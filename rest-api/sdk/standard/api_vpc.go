@@ -284,6 +284,7 @@ type ApiGetAllVpcRequest struct {
 	ctx                      context.Context
 	ApiService               *VPCAPIService
 	org                      string
+	infrastructureProviderId *string
 	siteId                   *string
 	status                   *string
 	networkSecurityGroupId   *string
@@ -293,6 +294,12 @@ type ApiGetAllVpcRequest struct {
 	pageNumber               *int32
 	pageSize                 *int32
 	orderBy                  *string
+}
+
+// Filter VPCs by Infrastructure Provider ID
+func (r ApiGetAllVpcRequest) InfrastructureProviderId(infrastructureProviderId string) ApiGetAllVpcRequest {
+	r.infrastructureProviderId = &infrastructureProviderId
+	return r
 }
 
 // Filter VPCs by Site ID. Can be specified multiple times to filter on more than one Site.
@@ -395,6 +402,9 @@ func (a *VPCAPIService) GetAllVpcExecute(r ApiGetAllVpcRequest) ([]VPC, *http.Re
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
 
+	if r.infrastructureProviderId != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "infrastructureProviderId", r.infrastructureProviderId, "form", "")
+	}
 	if r.siteId != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
 	}

@@ -4125,7 +4125,7 @@ func NewGetAllInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, 
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param infrastructureProviderId query string true "Infrastructure Provider ID"
+// @Param infrastructureProviderId query string false "Infrastructure Provider ID"
 // @Param siteId query string true "ID of Site"
 // @Param vpcId query string true "ID of Vpc"
 // @Param instanceTypeId query string false "ID of Instance Type"
