@@ -16,12 +16,14 @@
  */
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 pub use iface::{
-    Filter, GetPartitionOptions, IBFabric, IBFabricConfig, IBFabricManager, IBFabricVersions,
+    Filter, GetPartitionOptions, IBFabric, IBFabricConfig, IBFabricManager, IBFabricRawResponse,
+    IBFabricVersions,
 };
 pub use model::ib::{IBMtu, IBRateLimit, IBServiceLevel};
 
@@ -33,6 +35,8 @@ mod iface;
 mod rest;
 mod ufmclient;
 
+#[cfg(feature = "test-support")]
+pub mod fakes;
 #[cfg(feature = "test-support")]
 mod mock;
 
@@ -51,6 +55,29 @@ pub struct IBFabricManagerImpl {
     #[cfg(feature = "test-support")]
     mock_fabric: Arc<mock::MockIBFabric>,
     disable_fabric: Arc<dyn IBFabric>,
+    /// Application-lifetime cache of built REST clients, one per fabric.
+    /// [`IBFabricManager::new_client`] reuses an entry until the fabric's
+    /// credentials or endpoint change; see there for the full policy.
+    rest_clients: Mutex<HashMap<String, CachedFabricClient>>,
+}
+
+/// A built REST client together with the fingerprint of the endpoint and
+/// credentials it was built from. The client is reused only while a fresh
+/// credential read still matches that fingerprint.
+struct CachedFabricClient {
+    fingerprint: u64,
+    client: Arc<dyn IBFabric>,
+}
+
+/// Fingerprint of everything a REST client is built from: the resolved
+/// endpoint and the fabric's credentials. A changed endpoint (config reload)
+/// or changed credentials (secret rotation) produce a new fingerprint and
+/// therefore a rebuilt client.
+fn fabric_client_fingerprint(endpoint: &str, credentials: &Credentials) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    endpoint.hash(&mut hasher);
+    credentials.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl IBFabricManagerImpl {
@@ -58,6 +85,15 @@ impl IBFabricManagerImpl {
     #[cfg(feature = "test-support")]
     pub fn get_mock_manager(&self) -> Arc<mock::MockIBFabric> {
         self.mock_fabric.clone()
+    }
+
+    /// Locks the REST-client cache. The critical sections only look up and
+    /// insert map entries, so a poisoned lock leaves the map usable; recover
+    /// it instead of propagating the panic into fabric-protocol paths.
+    fn lock_rest_clients(&self) -> MutexGuard<'_, HashMap<String, CachedFabricClient>> {
+        self.rest_clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -123,6 +159,7 @@ pub fn create_ib_fabric_manager(
         #[cfg(feature = "test-support")]
         mock_fabric,
         disable_fabric,
+        rest_clients: Mutex::new(HashMap::new()),
     })
 }
 
@@ -132,6 +169,22 @@ impl IBFabricManager for IBFabricManagerImpl {
         self.config.clone()
     }
 
+    /// Returns the client for `fabric_name`, building one only when needed.
+    ///
+    /// The `Rest` client lives for the life of the process: every call still
+    /// reads the fabric's credentials from the secret manager -- so rotations
+    /// are picked up promptly -- but the client is rebuilt only when that read
+    /// returns different credentials, or the fabric's endpoint resolves
+    /// differently, than the cached client was built from. Between rebuilds
+    /// all callers share one client, whose HTTP pool keeps connections warm
+    /// across monitor passes. (`Disable` and `Mock` hand out process-wide
+    /// shared instances anyway.)
+    ///
+    /// Concurrent misses for the same fabric may each build a client, last
+    /// insert wins -- a benign duplicate build that opens no connection, since
+    /// the client connects lazily on first use. The production callers are
+    /// serial reconcile/monitor loops, so per-fabric in-flight serialization
+    /// would be machinery without a workload.
     async fn new_client(&self, fabric_name: &str) -> Result<Arc<dyn IBFabric>, IbError> {
         match self.config.manager_type {
             IBFabricManagerType::Disable => Ok(self.disable_fabric.clone()),
@@ -167,11 +220,31 @@ impl IBFabricManager for IBFabricManagerImpl {
                         ))
                     })?;
 
+                let fingerprint = fabric_client_fingerprint(endpoint, &credentials);
+                let cached = self
+                    .lock_rest_clients()
+                    .get(fabric_name)
+                    .filter(|cached| cached.fingerprint == fingerprint)
+                    .map(|cached| cached.client.clone());
+                if let Some(client) = cached {
+                    return Ok(client);
+                }
+
                 let (_deprecated_address, token) = match credentials {
                     Credentials::UsernamePassword { username, password } => (username, password),
                 };
 
-                rest::new_client(endpoint, &token)
+                // Built outside the lock; see the method doc for the benign
+                // concurrent-build race this allows.
+                let client = rest::new_client(endpoint, &token)?;
+                self.lock_rest_clients().insert(
+                    fabric_name.to_string(),
+                    CachedFabricClient {
+                        fingerprint,
+                        client: client.clone(),
+                    },
+                );
+                Ok(client)
             }
         }
     }
@@ -331,6 +404,111 @@ mod tests {
         assert_eq!(
             client.get_fabric_config().await.unwrap_err().to_string(),
             "Failed to call IBFabricManager: ib fabric is disabled"
+        );
+    }
+
+    // ============================================================
+    // Unit Tests for the application-lifetime REST client cache
+    // ============================================================
+
+    /// A credential reader whose returned credentials the test can swap,
+    /// standing in for a secret-manager rotation between `new_client` calls.
+    struct SwappableCredentialReader {
+        credentials: Mutex<Credentials>,
+    }
+
+    impl SwappableCredentialReader {
+        fn new(token: &str) -> Self {
+            Self {
+                credentials: Mutex::new(Self::credentials(token)),
+            }
+        }
+
+        fn credentials(token: &str) -> Credentials {
+            Credentials::UsernamePassword {
+                username: "ufm-user".to_string(),
+                password: token.to_string(),
+            }
+        }
+
+        fn rotate(&self, token: &str) {
+            *self.credentials.lock().unwrap() = Self::credentials(token);
+        }
+    }
+
+    #[async_trait]
+    impl CredentialReader for SwappableCredentialReader {
+        async fn get_credentials(
+            &self,
+            _key: &CredentialKey,
+        ) -> Result<Option<Credentials>, SecretsError> {
+            Ok(Some(self.credentials.lock().unwrap().clone()))
+        }
+    }
+
+    /// A `Rest` manager over two fabrics. Building a REST client makes no
+    /// connection (it connects lazily on first use), so these tests exercise
+    /// the real build + cache path without a UFM server.
+    fn rest_manager(reader: Arc<dyn CredentialReader>) -> IBFabricManagerImpl {
+        let config = IBFabricManagerConfig {
+            manager_type: IBFabricManagerType::Rest,
+            endpoints: HashMap::from([
+                ("f1".to_string(), vec!["https://127.0.0.1:443".to_string()]),
+                ("f2".to_string(), vec!["https://127.0.0.2:443".to_string()]),
+            ]),
+            ..Default::default()
+        };
+        create_ib_fabric_manager(reader, config).unwrap()
+    }
+
+    #[tokio::test]
+    async fn unchanged_credentials_reuse_the_cached_rest_client() {
+        let manager = rest_manager(Arc::new(SwappableCredentialReader::new("token-a")));
+
+        let first = manager.new_client("f1").await.unwrap();
+        let second = manager.new_client("f1").await.unwrap();
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "unchanged credentials must return the cached client, not a rebuild"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotated_credentials_rebuild_the_rest_client() {
+        let reader = Arc::new(SwappableCredentialReader::new("token-a"));
+        let manager = rest_manager(reader.clone());
+
+        let before = manager.new_client("f1").await.unwrap();
+        reader.rotate("token-b");
+        let after = manager.new_client("f1").await.unwrap();
+        let after_again = manager.new_client("f1").await.unwrap();
+
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "rotated credentials must rebuild the client"
+        );
+        assert!(
+            Arc::ptr_eq(&after, &after_again),
+            "the rebuilt client replaces the cache entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_fabrics_cache_distinct_rest_clients() {
+        let manager = rest_manager(Arc::new(SwappableCredentialReader::new("token-a")));
+
+        let f1 = manager.new_client("f1").await.unwrap();
+        let f2 = manager.new_client("f2").await.unwrap();
+
+        assert!(!Arc::ptr_eq(&f1, &f2), "each fabric gets its own client");
+        assert!(
+            Arc::ptr_eq(&f1, &manager.new_client("f1").await.unwrap()),
+            "reusing one fabric leaves its entry in place"
+        );
+        assert!(
+            Arc::ptr_eq(&f2, &manager.new_client("f2").await.unwrap()),
+            "and does not disturb the other fabric's entry"
         );
     }
 }
