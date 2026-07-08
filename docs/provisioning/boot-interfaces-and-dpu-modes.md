@@ -36,6 +36,8 @@ A host's management network lives on one of a few segment types. Which one depen
 
 In NICo the **boot interface and the primary interface are the same thing by construction**: a host's `primary` interface is the one its boot order targets. A boot interface is a `(MAC, Redfish interface id)` pair — the MAC identifies the NIC on the wire; the Redfish id lets NICo set the boot order on the BMC. NICo refers to this pair as the host's `MachineBootInterface`.
 
+NICo keeps both halves because the MAC alone can go stale: a NIC can drop out of the BMC's Redfish inventory (taking its MAC with it) while the interface id remains addressable. Every targeted Redfish operation tries the MAC first and retries with the interface id on any error, so boot configuration keeps working when the MAC has vanished from the inventory — as happens after a DPU-to-NIC-mode flip, or when a NIC de-enumerates across a reboot.
+
 ---
 
 ## 2. Configuring via Expected Machines and the defaults
@@ -196,6 +198,7 @@ All of these are **admin-only**; the Forge gRPC service enforces admin authoriza
 
 | admin-cli | Forge RPC | Purpose |
 |---|---|---|
+| `machine boot-interfaces <machine-id>` | `GetMachineBootInterfaces` | Show the boot interface as recorded in every store ([Section 7](#7-the-boot-interface-data-model)), the effective selection, and a divergence flag ([Section 8](#8-verifying-and-troubleshooting)). Read-only. |
 | `managed-host set-primary-interface <host-id> <interface-id> [--reboot]` | `SetPrimaryInterface` | Designate a machine interface as the host's primary/boot interface. **The modern form.** |
 | `managed-host set-primary-dpu <host-id> <dpu-id> [--reboot]` | `SetPrimaryDpu` | Designate a DPU as primary. *Deprecated — prefer `set-primary-interface`.* |
 | `boot-override set <interface-id> [--custom-pxe <f>] [--custom-user-data <f>]` | `SetMachineBootOverride` | Override the iPXE script / cloud-init user-data served at boot. |
@@ -203,6 +206,8 @@ All of these are **admin-only**; the Forge gRPC service enforces admin authoriza
 | `boot-override clear <interface-id>` | `ClearMachineBootOverride` | Revert to the default PXE/cloud-init. |
 
 > Setting the DPU-first boot order directly (by MAC) is also exposed as a one-off action through the web UI ([Section 5](#5-web-ui)). Under normal operation the machine-controller sets the boot order automatically during ingestion ([Section 6](#6-behind-the-scenes-how-a-boot-device-is-chosen-and-set)).
+
+> **The direct-to-BMC escape hatch.** The `redfish` command group (`redfish machine-setup`, `redfish set-boot-order-dpu-first`, `redfish is-boot-order-setup`, …) talks to a BMC directly, using operator-supplied credentials and a hand-typed `--boot-interface-mac`. It consults none of the stores in this guide and gets no interface-id fallback. It is useful against a BMC NICo doesn't manage yet; for managed hosts, prefer the commands above so the database and the BMC stay in agreement.
 
 ### Ingestion control
 
@@ -270,20 +275,44 @@ At each boot-config step the controller resolves the target via `load_boot_predi
 
 ### Applying the boot order
 
-- `configure_host_bios` (at `WaitingForPlatformConfiguration`) calls Redfish `machine_setup` with the resolved boot interface; on Dell this schedules a BIOS job (`WaitingForBiosJob`).
+- `configure_host_bios` (at `WaitingForPlatformConfiguration`) calls Redfish `machine_setup` with the resolved boot interface. This configures the BIOS, including the **UEFI HTTP-boot device** pointed at the boot NIC; on Dell it schedules a BIOS job (`WaitingForBiosJob`).
 - `PollingBiosSetup` verifies the BIOS settings took.
-- `SetBootOrder` sets the host boot order via Redfish — **DPU-first** for DPU hosts; for zero-DPU/NIC-mode hosts it targets the resolved HostInband interface (a "no DPU" response from the BMC is expected and treated as success).
+- `SetBootOrder` is **check-first**: it verifies the HTTP-boot device and the boot order before writing anything, and a host whose configuration is already in place skips straight to verification. Nothing is re-applied unless something actually drifted — two BIOS writes never share one pass (on Dell they would collide in a single pending configuration job).
+- If the check finds the HTTP-boot device **reverted** — the boot NIC dropped out of the BMC's Redfish inventory across a reboot, which some NICs do — `SetBootOrder` re-asserts it with `machine_setup` and reboots the host to apply that change first. A `WaitForHttpBootDeviceApplied` substate then polls for up to 10 minutes; if the device still hasn't applied, it re-asserts again, up to 3 times, before surfacing the host for manual intervention ([Section 8](#8-verifying-and-troubleshooting)).
+- With the HTTP-boot device in place, the boot order itself is set via Redfish — **DPU-first** for DPU hosts; for zero-DPU/NIC-mode hosts it targets the resolved HostInband interface (a "no DPU" response from the BMC is expected and treated as success).
 - On a reprovision repair, `check_host_boot_config` re-checks BIOS + boot order and only remediates if they drifted.
 
 ---
 
 ## 7. The boot-interface data model
 
-The boot interface flows through three tables: **predicted → managed → retained**.
+A host's boot interface is recorded in **four stores**. Three form the machine's own lineage — **predicted → managed → retained** — and the fourth is the **explored default** that site-explorer keeps per BMC endpoint, for hosts no machine owns yet ([Section 7.4](#74-selection-precedence)). `nico-admin-cli machine boot-interfaces` prints all four side by side ([Section 8](#8-verifying-and-troubleshooting)).
+
+```mermaid
+flowchart LR
+    subgraph lineage["The machine's own lineage"]
+        EXPM["expected_machines.host_nics<br/>declared primary + segment type"]
+        PRED[("predicted_machine_interfaces")]
+        OWNED[("machine_interfaces<br/>authoritative once owned")]
+        RET[("retained_boot_interfaces")]
+    end
+    EXPL[("explored_endpoints<br/>automatic default per BMC endpoint")]
+    ACT["boot actions<br/>machine_setup, boot order"]
+
+    EXPM -->|"machine creation mints predictions"| PRED
+    PRED -->|"first DHCP lease promotes"| OWNED
+    OWNED -->|"deletion retains the Redfish id"| RET
+    RET -->|"the next row for that MAC consumes"| OWNED
+    OWNED -->|"owned machines"| ACT
+    PRED -->|"before the first lease"| ACT
+    EXPL -->|"endpoints no machine owns"| ACT
+```
+
+Every exploration pass refreshes the Redfish interface id on owned rows, predictions, and the explored default alike, so all three stay as current as the last healthy exploration.
 
 ### 7.1 Predicted (`predicted_machine_interfaces`)
 
-Site-explorer mints a prediction per declared host NIC **before** the host's first DHCP lease. A prediction carries `machine_id`, `mac_address`, `network_segment_type`, the operator's declared `primary` intent, and the `boot_interface_id` (the Redfish `EthernetInterface.Id`, captured from the exploration report once available). Predictions are what the controller uses to configure boot pre-lease.
+Site-explorer mints a prediction per declared host NIC **before** the host's first DHCP lease. A prediction records `machine_id`, `mac_address`, `network_segment_type`, the operator's declared `primary` intent, and the `boot_interface_id` (the Redfish `EthernetInterface.Id`, captured from the exploration report once available). Predictions are what the controller uses to configure boot pre-lease.
 
 ### 7.2 Managed (`machine_interfaces`) — promotion
 
@@ -321,7 +350,15 @@ The same precedence applies wherever NICo picks a boot interface, over owned row
 
 ## 8. Verifying and troubleshooting
 
-**Check a host's boot interface:**
+**First stop — the four-store view:**
+
+```bash
+nico-admin-cli -a <api-url> machine boot-interfaces <machine-id>
+```
+
+This read-only command prints the machine's boot interface as recorded in all four stores ([Section 7](#7-the-boot-interface-data-model)) side by side — owned rows, predictions, the explored default, and retained pairs (stale ones included) — plus the **effective** boot interface NICo would select, and a `divergent` flag set when the stores name more than one boot MAC (retained records don't count toward disagreement). Divergence is normal mid-transition, for example between a mode flip and the re-ingest; persistent divergence on a settled host is worth investigating. For scripting, the global `--output json|yaml` flag applies.
+
+**For a quick primary check:**
 
 ```bash
 nico-admin-cli -a <api-url> managed-host show <machine-id>
@@ -335,6 +372,7 @@ The interfaces section shows each NIC's MAC, segment, and which one is `primary`
 |---|---|
 | `boot_interface_mac_mismatch` (pairing blocker) | The host's boot MAC doesn't match any discovered DPU's pf0 MAC. Expected for an integrated-NIC host — declare the integrated NIC `primary` (see [3.4](#34-boot-an-integrated-nic-while-keeping-the-dpus-managed)); otherwise check the exploration reports. See [Ingesting Hosts → pairing blockers](ingesting-hosts.md#common-blockers-during-host--dpu-pairing). |
 | Host stuck waiting for a boot NIC | A zero-DPU/NIC-mode host whose boot NIC hasn't leased yet (`AwaitingNic`). Confirm the NIC is cabled and DHCP-reachable on its HostInband segment. |
+| `HTTP boot device on host … still not applied after 3 re-asserts` | The boot NIC keeps dropping out of the BMC's Redfish inventory across reboots, so the re-asserted HTTP-boot device never verifies ([Section 6](#6-behind-the-scenes-how-a-boot-device-is-chosen-and-set)). Investigate why the NIC doesn't enumerate (NIC/BMC firmware); once it appears in the BMC's `EthernetInterfaces`, use **Machine Setup** in the web UI to re-assert and reboot. See the [Stuck Objects playbook](../playbooks/stuck_objects/stuck_objects.md) for restarting a failed state machine. |
 | Boot interface wrong after a DPU↔NIC-mode flip | Use **Restore Boot Interface** in the web UI, or re-ingest ([3.5](#35-flipping-a-dpu-to-nic-mode)). |
 | DPU mode "unknown" (`dpu_nic_mode_unknown`) | DPU BMC firmware too old to report mode. Install a fresh DPU OS — see [Ingesting Hosts](ingesting-hosts.md#dpu-related-issues-installing-a-fresh-dpu-os). |
 
