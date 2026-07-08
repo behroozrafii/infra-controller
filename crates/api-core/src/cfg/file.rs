@@ -3998,6 +3998,27 @@ mod tests {
         Ok(())
     }
 
+    /// Every hardware class SiteExplorer can identify is ingested by default:
+    /// a config whose `[site_explorer]` section omits the creation flags gets
+    /// the same behavior as one with no section at all. Creation stays gated
+    /// per device on a matching expected-hardware record, so these defaults
+    /// only ingest declared hardware.
+    #[test]
+    fn site_explorer_creation_flags_default_on() -> eyre::Result<()> {
+        use std::sync::atomic::Ordering;
+
+        let config = serde_json::from_str::<SiteExplorerConfig>("{}")?;
+        assert!(config.create_machines.load(Ordering::Relaxed));
+        assert!(config.create_switches.load(Ordering::Relaxed));
+        assert!(config.create_power_shelves.load(Ordering::Relaxed));
+        assert!(
+            config
+                .explore_power_shelves_from_static_ip
+                .load(Ordering::Relaxed)
+        );
+        Ok(())
+    }
+
     /// Verifies the `[site_explorer] dpu_mode = ...` setting parses
     /// correctly for every named variant. When unset (the default),
     /// `site_explorer.dpu_mode` is `None` and hosts resolve to

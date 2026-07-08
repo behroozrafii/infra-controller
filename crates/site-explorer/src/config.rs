@@ -145,7 +145,9 @@ pub struct SiteExplorerConfig {
     #[serde(default)]
     pub allocate_secondary_vtep_ip: bool,
 
-    /// Whether SiteExplorer should create Power Shelf state machine
+    /// Whether SiteExplorer should create PowerShelf objects for explored power
+    /// shelves that match an `expected_power_shelf` record. Defaults to true;
+    /// set false to disable power shelf ingestion site-wide.
     #[serde(
         default = "SiteExplorerConfig::default_create_power_shelves",
         deserialize_with = "deserialize_arc_atomic_bool",
@@ -153,7 +155,9 @@ pub struct SiteExplorerConfig {
     )]
     pub create_power_shelves: Arc<AtomicBool>,
 
-    /// Whether SiteExplorer should create Power Shelf state machine from static IP
+    /// Whether SiteExplorer should explore and ingest power shelves reachable
+    /// only at their `expected_power_shelf` static IP (no DHCP lease).
+    /// Defaults to true.
     #[serde(
         default = "SiteExplorerConfig::default_explore_power_shelves_from_static_ip",
         deserialize_with = "deserialize_arc_atomic_bool",
@@ -166,7 +170,9 @@ pub struct SiteExplorerConfig {
     #[serde(default = "SiteExplorerConfig::default_power_shelves_created_per_run")]
     pub power_shelves_created_per_run: u64,
 
-    /// Whether SiteExplorer should create Switch state machine
+    /// Whether SiteExplorer should create Switch objects for explored switches
+    /// that match an `expected_switch` record. Defaults to true; set false to
+    /// disable switch ingestion site-wide.
     #[serde(
         default = "SiteExplorerConfig::default_create_switches",
         deserialize_with = "deserialize_arc_atomic_bool",
@@ -199,12 +205,12 @@ pub struct SiteExplorerConfig {
 impl Default for SiteExplorerConfig {
     fn default() -> Self {
         SiteExplorerConfig {
-            enabled: Arc::new(true.into()),
+            enabled: Self::default_enabled(),
             retained_boot_interface_window: None,
             run_interval: Self::default_run_interval(),
             concurrent_explorations: Self::default_concurrent_explorations(),
             explorations_per_run: Self::default_explorations_per_run(),
-            create_machines: Arc::new(true.into()),
+            create_machines: Self::default_create_machines(),
             machines_created_per_run: Self::default_machines_created_per_run(),
             override_target_ip: None,
             override_target_port: None,
@@ -213,10 +219,11 @@ impl Default for SiteExplorerConfig {
             reset_rate_limit: Self::default_reset_rate_limit(),
             admin_segment_type_non_dpu: Self::default_admin_segment_type_non_dpu(),
             allocate_secondary_vtep_ip: false,
-            create_power_shelves: Arc::new(true.into()),
-            explore_power_shelves_from_static_ip: Arc::new(true.into()),
+            create_power_shelves: Self::default_create_power_shelves(),
+            explore_power_shelves_from_static_ip:
+                Self::default_explore_power_shelves_from_static_ip(),
             power_shelves_created_per_run: Self::default_power_shelves_created_per_run(),
-            create_switches: Arc::new(true.into()),
+            create_switches: Self::default_create_switches(),
             switches_created_per_run: Self::default_switches_created_per_run(),
             rotate_switch_nvos_credentials: Self::default_rotate_switch_nvos_credentials(),
             dpu_mode: None,
@@ -228,13 +235,45 @@ impl Default for SiteExplorerConfig {
 impl PartialEq for SiteExplorerConfig {
     fn eq(&self, other: &SiteExplorerConfig) -> bool {
         self.enabled.load(AtomicOrdering::Relaxed) == other.enabled.load(AtomicOrdering::Relaxed)
+            && self.retained_boot_interface_window == other.retained_boot_interface_window
             && self.run_interval == other.run_interval
             && self.concurrent_explorations == other.concurrent_explorations
             && self.explorations_per_run == other.explorations_per_run
             && self.create_machines.load(AtomicOrdering::Relaxed)
                 == other.create_machines.load(AtomicOrdering::Relaxed)
+            && self.machines_created_per_run == other.machines_created_per_run
+            && self
+                .rotate_switch_nvos_credentials
+                .load(AtomicOrdering::Relaxed)
+                == other
+                    .rotate_switch_nvos_credentials
+                    .load(AtomicOrdering::Relaxed)
             && self.override_target_ip == other.override_target_ip
             && self.override_target_port == other.override_target_port
+            && self.bmc_proxy.load_full() == other.bmc_proxy.load_full()
+            && self.allow_changing_bmc_proxy == other.allow_changing_bmc_proxy
+            && self.reset_rate_limit == other.reset_rate_limit
+            && self
+                .admin_segment_type_non_dpu
+                .load(AtomicOrdering::Relaxed)
+                == other
+                    .admin_segment_type_non_dpu
+                    .load(AtomicOrdering::Relaxed)
+            && self.allocate_secondary_vtep_ip == other.allocate_secondary_vtep_ip
+            && self.create_power_shelves.load(AtomicOrdering::Relaxed)
+                == other.create_power_shelves.load(AtomicOrdering::Relaxed)
+            && self
+                .explore_power_shelves_from_static_ip
+                .load(AtomicOrdering::Relaxed)
+                == other
+                    .explore_power_shelves_from_static_ip
+                    .load(AtomicOrdering::Relaxed)
+            && self.power_shelves_created_per_run == other.power_shelves_created_per_run
+            && self.create_switches.load(AtomicOrdering::Relaxed)
+                == other.create_switches.load(AtomicOrdering::Relaxed)
+            && self.switches_created_per_run == other.switches_created_per_run
+            && self.dpu_mode == other.dpu_mode
+            && self.explore_mode == other.explore_mode
     }
 }
 
@@ -276,11 +315,11 @@ impl SiteExplorerConfig {
     }
 
     pub fn default_create_power_shelves() -> Arc<AtomicBool> {
-        Arc::new(false.into())
+        Arc::new(true.into())
     }
 
     pub fn default_explore_power_shelves_from_static_ip() -> Arc<AtomicBool> {
-        Arc::new(false.into())
+        Arc::new(true.into())
     }
 
     pub const fn default_power_shelves_created_per_run() -> u64 {
@@ -288,7 +327,7 @@ impl SiteExplorerConfig {
     }
 
     pub fn default_create_switches() -> Arc<AtomicBool> {
-        Arc::new(false.into())
+        Arc::new(true.into())
     }
 
     pub const fn default_switches_created_per_run() -> u64 {
@@ -306,7 +345,7 @@ pub fn bmc_proxy(s: Option<HostPortPair>) -> Arc<ArcSwap<Option<HostPortPair>>> 
 
 /// Selects the Redfish client backend used by SiteExplorer
 /// for BMC discovery.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum SiteExplorerExploreMode {
     /// Use the libredfish Rust client.
     #[serde(rename = "libredfish")]

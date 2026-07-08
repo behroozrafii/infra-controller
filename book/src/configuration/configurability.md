@@ -341,7 +341,12 @@ plus thresholds for DPU agent compliance. Operators flip this from
 `[site_explorer].run_interval` controls how often background hardware
 discovery scans run. `[site_explorer].create_machines` toggles whether
 discovered hardware is auto-registered as machines (useful to disable in
-manual-onboarding environments).
+manual-onboarding environments). `[site_explorer].create_switches` and
+`[site_explorer].create_power_shelves` are the same toggle for switches and
+power shelves. All three default to on, and creation is additionally gated
+per device on a matching expected-hardware record (`expected_machines`,
+`expected_switch`, `expected_power_shelf`), so only declared hardware is
+ever ingested.
 
 ### TLS / transport — `[tls]` and `listen_mode`
 
@@ -1180,6 +1185,7 @@ on or off.
 | SPDM | siteConfig | `[spdm].enabled` | off | Hardware attestation via NRAS. |
 | Rack Management | siteConfig | `rack_management_enabled = true` | off | Standalone infrastructure manager mode (GB200/GB300/VR144). |
 | Site Explorer machine auto-creation | siteConfig | `[site_explorer].create_machines` | on | Disable for manual-onboarding environments. |
+| Site Explorer switch / power shelf auto-creation | siteConfig | `[site_explorer].create_switches` / `[site_explorer].create_power_shelves` | on | Ingests only declared hardware (`expected_switch` / `expected_power_shelf` records). Disable to hold switch or power shelf ingestion back site-wide. |
 | Firmware autoupdate | siteConfig | `[firmware_global].autoupdate` | off | Enable once the fleet's firmware baseline is stable. |
 | Component Manager (compute trays / NvLink switches / power shelves) | siteConfig | `[component_manager]` present | off | GB200/GB300 sites with managed compute, power, and switch fabric. RMS backends require rack profile data for node type resolution. |
 | Auto-repair plugin | siteConfig | `[auto_machine_repair_plugin]` | off | Enable per fault class as fleet maturity grows. |
