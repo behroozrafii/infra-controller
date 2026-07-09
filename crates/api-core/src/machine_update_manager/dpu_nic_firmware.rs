@@ -29,6 +29,10 @@ use sqlx::PgConnection;
 
 use super::dpu_nic_firmware_metrics::DpuNicFirmwareUpdateMetrics;
 use super::machine_update_module::MachineUpdateModule;
+use super::metrics::{
+    FirmwareUpdateFailed, FirmwareUpdateFailureCause, FirmwareUpdatePhase, FirmwareUpdateProgress,
+    FirmwareUpdateTarget,
+};
 use crate::cfg::file::CarbideConfig;
 use crate::machine_update_manager::MachineUpdateManager;
 use crate::{CarbideResult, DatabaseError};
@@ -105,11 +109,6 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 output + format!("{} ({}) ", dpu.dpu_machine_id, dpu.firmware_version).as_str()
             });
 
-            tracing::info!(
-                "Starting DPU updates for host {}: {}",
-                host_machine_id,
-                dpu_update_string
-            );
             // If the reprovisioning failed to update the database for a
             // given {dpu,host}_machine_id, log it as a warning and don't
             // add it to updates_started.
@@ -124,11 +123,13 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
             {
                 match reprovisioning_err {
                     DatabaseError::NotFoundError { id, .. } => {
-                        tracing::warn!(
-                            "failed to trigger reprovisioning for managed host : {} - no update match for id: {}",
-                            host_machine_id,
-                            id
-                        );
+                        carbide_instrument::emit(FirmwareUpdateFailed {
+                            target: FirmwareUpdateTarget::DpuNic,
+                            cause: FirmwareUpdateFailureCause::NoUpdateMatch,
+                            machine_id: host_machine_id,
+                            unmatched_dpu_machine_id: id,
+                            firmware_version: String::new(),
+                        });
                         continue;
                     }
                     _ => {
@@ -139,6 +140,15 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
 
             txn.commit().await?;
 
+            // Counted only once the trigger is committed: a DPU that left
+            // ready between snapshot and trigger is a NoUpdateMatch failure,
+            // not a started update.
+            carbide_instrument::emit(FirmwareUpdateProgress {
+                target: FirmwareUpdateTarget::DpuNic,
+                phase: FirmwareUpdatePhase::Started,
+                machine_id: host_machine_id,
+                detail: dpu_update_string,
+            });
             updates_started.insert(host_machine_id);
         }
 
@@ -165,11 +175,13 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                     );
                 }
             } else {
-                tracing::warn!(
-                    machine_id = %updated_machine.dpu_machine_id,
-                    firmware_version = %updated_machine.firmware_version,
-                    "Incorrect firmware version after attempted update"
-                );
+                carbide_instrument::emit(FirmwareUpdateFailed {
+                    target: FirmwareUpdateTarget::DpuNic,
+                    cause: FirmwareUpdateFailureCause::WrongVersionAfterUpdate,
+                    machine_id: updated_machine.dpu_machine_id,
+                    unmatched_dpu_machine_id: String::new(),
+                    firmware_version: updated_machine.firmware_version,
+                });
             }
         }
         Ok(())

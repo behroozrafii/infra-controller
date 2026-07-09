@@ -17,6 +17,7 @@
 use std::collections::HashSet;
 use std::string::ToString;
 
+use carbide_instrument::testing::MetricsCapture;
 use carbide_machine_controller::health_report::create_host_update_health_report_dpufw;
 use common::api_fixtures::{create_managed_host, create_managed_host_multi_dpu, create_test_env};
 use model::machine::LoadSnapshotOptions;
@@ -53,6 +54,8 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
         .await
         .expect("Failed to create transaction");
 
+    let metrics = MetricsCapture::start();
+
     let started_count = dpu_nic_firmware_update
         .start_updates(&env.pool, 10, &HashSet::default(), &snapshots)
         .await?;
@@ -60,6 +63,17 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     assert_eq!(started_count.len(), 1);
     assert!(!started_count.contains(&managed_host.dpu().id));
     assert!(started_count.contains(&managed_host.id));
+
+    // Starting the host's DPU updates moves the progress counter. Other tests
+    // in this binary drive the same emit concurrently (MetricsCapture
+    // serializes only metric-asserting tests), so assert at least one rather
+    // than exactly one.
+    assert!(
+        metrics.counter_delta(
+            "carbide_firmware_updates_total",
+            &[("target", "dpu_nic"), ("phase", "started")],
+        ) >= 1.0
+    );
 
     // Check if health override is placed
     let managed_host = managed_host.snapshot(&mut txn).await;
