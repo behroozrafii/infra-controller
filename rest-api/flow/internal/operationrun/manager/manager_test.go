@@ -114,6 +114,325 @@ func TestListTargetsMapsStoreNoRowsToNotFound(t *testing.T) {
 	require.ErrorContains(t, err, runID.String())
 }
 
+func TestPauseMarksRunOperatorPaused(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := &mockStore{
+		lockRun: testLockedRun(
+			t,
+			runID,
+			operationrun.OperationRunStatusRunning,
+			operationrun.OperationRunStatusReasonNone,
+		),
+	}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+
+	got, err := manager.Pause(context.Background(), runID)
+
+	require.NoError(t, err)
+	require.Same(t, store.lockRun, got)
+	require.Equal(t, 1, store.txCalls)
+	require.Equal(t, 1, store.updateRunCalls)
+	require.Equal(t, operationrun.OperationRunStatusPaused, store.updatedRun.Status)
+	require.Equal(
+		t,
+		operationrun.OperationRunStatusReasonOperatorPaused,
+		store.updatedRun.StatusReason,
+	)
+}
+
+func TestPauseLeavesAlreadyPausedRunUnchanged(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := &mockStore{
+		lockRun: testLockedRun(
+			t,
+			runID,
+			operationrun.OperationRunStatusPaused,
+			operationrun.OperationRunStatusReasonSafetyGate,
+		),
+	}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+
+	got, err := manager.Pause(context.Background(), runID)
+
+	require.NoError(t, err)
+	require.Same(t, store.lockRun, got)
+	require.Equal(t, 1, store.txCalls)
+	require.Zero(t, store.updateRunCalls)
+	require.Equal(
+		t,
+		operationrun.OperationRunStatusReasonSafetyGate,
+		got.StatusReason,
+	)
+}
+
+func TestPauseRejectsNilLockedRun(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := &mockStore{lockRunNil: true}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+
+	got, err := manager.Pause(context.Background(), runID)
+
+	require.Nil(t, got)
+	require.ErrorIs(t, err, ErrOperationRunRequired)
+	require.Equal(t, 1, store.txCalls)
+}
+
+func TestResumeRejectsPhaseGatePause(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := &mockStore{
+		lockRun: testLockedRun(
+			t,
+			runID,
+			operationrun.OperationRunStatusPaused,
+			operationrun.OperationRunStatusReasonPhaseGate,
+		),
+	}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+
+	got, err := manager.Resume(context.Background(), runID)
+
+	require.Nil(t, got)
+	require.ErrorIs(t, err, ErrOperationRunInvalidState)
+	require.ErrorContains(t, err, "AdvanceOperationRunPhase")
+	require.Zero(t, store.updateRunCalls)
+}
+
+func TestAdvancePhaseStartsNextPhase(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := &mockStore{
+		lockRun: testLockedRun(
+			t,
+			runID,
+			operationrun.OperationRunStatusPaused,
+			operationrun.OperationRunStatusReasonPhaseGate,
+		),
+		lockedTargets: []*operationrun.OperationRunTarget{
+			testOperationRunTarget(runID, 0, operationrun.OperationRunTargetStatusCompleted),
+			testOperationRunTarget(runID, 1, operationrun.OperationRunTargetStatusPending),
+		},
+	}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+	expectedPhase := int32(1)
+
+	got, err := manager.AdvancePhase(context.Background(), runID, &expectedPhase)
+
+	require.NoError(t, err)
+	require.Same(t, store.lockRun, got)
+	require.Equal(t, 1, store.updateRunCalls)
+	require.Equal(t, operationrun.OperationRunStatusRunning, store.updatedRun.Status)
+	require.Equal(t, operationrun.OperationRunStatusReasonNone, store.updatedRun.StatusReason)
+	require.Equal(t, "advanced to phase 1", store.updatedRun.StatusMessage)
+}
+
+func TestAdvancePhaseChecksExpectedPhase(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := &mockStore{
+		lockRun: testLockedRun(
+			t,
+			runID,
+			operationrun.OperationRunStatusPaused,
+			operationrun.OperationRunStatusReasonPhaseGate,
+		),
+		lockedTargets: []*operationrun.OperationRunTarget{
+			testOperationRunTarget(runID, 0, operationrun.OperationRunTargetStatusCompleted),
+			testOperationRunTarget(runID, 1, operationrun.OperationRunTargetStatusPending),
+		},
+	}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+	expectedPhase := int32(2)
+
+	got, err := manager.AdvancePhase(context.Background(), runID, &expectedPhase)
+
+	require.Nil(t, got)
+	require.ErrorIs(t, err, ErrOperationRunInvalidState)
+	require.ErrorContains(t, err, "expected phase 2, current phase is 1")
+	require.Zero(t, store.updateRunCalls)
+}
+
+func TestAdvancePhaseCompletesAllTerminalRun(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := &mockStore{
+		lockRun: testLockedRun(
+			t,
+			runID,
+			operationrun.OperationRunStatusPaused,
+			operationrun.OperationRunStatusReasonPhaseGate,
+		),
+		lockedTargets: []*operationrun.OperationRunTarget{
+			testOperationRunTarget(runID, 0, operationrun.OperationRunTargetStatusCompleted),
+			testOperationRunTarget(runID, 1, operationrun.OperationRunTargetStatusCompleted),
+		},
+	}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+	expectedPhase := int32(1)
+
+	got, err := manager.AdvancePhase(context.Background(), runID, &expectedPhase)
+
+	require.NoError(t, err)
+	require.Same(t, store.lockRun, got)
+	require.Equal(t, 1, store.updateRunCalls)
+	require.Equal(t, operationrun.OperationRunStatusCompleted, store.updatedRun.Status)
+	require.Equal(t, operationrun.OperationRunStatusReasonNone, store.updatedRun.StatusReason)
+	require.Equal(t, "operation run completed", store.updatedRun.StatusMessage)
+	require.NotNil(t, store.updatedRun.FinishedAt)
+}
+
+func TestAdvancePhaseRejectsInitialPhase(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := &mockStore{
+		lockRun: testLockedRun(
+			t,
+			runID,
+			operationrun.OperationRunStatusPaused,
+			operationrun.OperationRunStatusReasonPhaseGate,
+		),
+		lockedTargets: []*operationrun.OperationRunTarget{
+			testOperationRunTarget(runID, 0, operationrun.OperationRunTargetStatusPending),
+		},
+	}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+
+	got, err := manager.AdvancePhase(context.Background(), runID, nil)
+
+	require.Nil(t, got)
+	require.ErrorIs(t, err, ErrOperationRunInvalidState)
+	require.ErrorContains(t, err, "phase 0 is the initial phase")
+	require.Zero(t, store.updateRunCalls)
+}
+
+func TestCancelLeavesTargetsUnchangedAndAttemptsSubmittedCurrentPhaseTasks(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	taskID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	pendingTarget := testOperationRunTarget(
+		runID,
+		0,
+		operationrun.OperationRunTargetStatusPending,
+	)
+	submittedTarget := testOperationRunTargetWithTask(
+		runID,
+		0,
+		operationrun.OperationRunTargetStatusSubmitted,
+		taskID,
+	)
+	submittedTarget.Message = "submitted"
+	store := &mockStore{
+		lockRun: testLockedRun(
+			t,
+			runID,
+			operationrun.OperationRunStatusRunning,
+			operationrun.OperationRunStatusReasonNone,
+		),
+		lockedTargets: []*operationrun.OperationRunTarget{
+			pendingTarget,
+			submittedTarget,
+			testOperationRunTarget(runID, 1, operationrun.OperationRunTargetStatusPending),
+		},
+	}
+	canceller := &mockTaskCanceller{}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+
+	got, err := manager.Cancel(context.Background(), runID, "operator requested", canceller)
+
+	require.NoError(t, err)
+	require.Same(t, store.lockRun, got)
+	require.Equal(t, []string{
+		"lock_run",
+		"update_run",
+		"list_targets",
+	}, store.events)
+	require.Equal(t, []uuid.UUID{taskID}, canceller.cancelledTaskIDs)
+	require.Equal(t, operationrun.OperationRunStatusCancelled, store.updatedRun.Status)
+	require.Equal(t, "operation run cancelled: operator requested", store.updatedRun.StatusMessage)
+	require.Empty(t, store.updatedTargets)
+	require.Equal(t, operationrun.OperationRunTargetStatusPending, pendingTarget.Status)
+	require.Equal(t, operationrun.OperationRunTargetStatusSubmitted, submittedTarget.Status)
+	require.Equal(t, "submitted", submittedTarget.Message)
+}
+
+func TestCancelChildCancelFailureDoesNotPersistTargetFailureMessage(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	taskID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	target := testOperationRunTargetWithTask(
+		runID,
+		0,
+		operationrun.OperationRunTargetStatusSubmitted,
+		taskID,
+	)
+	target.Message = "submitted"
+	store := &mockStore{
+		lockRun: testLockedRun(
+			t,
+			runID,
+			operationrun.OperationRunStatusRunning,
+			operationrun.OperationRunStatusReasonNone,
+		),
+		lockedTargets: []*operationrun.OperationRunTarget{target},
+	}
+	canceller := &mockTaskCanceller{cancelErr: fmt.Errorf("cancel unavailable")}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+
+	got, err := manager.Cancel(context.Background(), runID, "operator requested", canceller)
+
+	require.NoError(t, err)
+	require.Same(t, store.lockRun, got)
+	require.Equal(t, []uuid.UUID{taskID}, canceller.cancelledTaskIDs)
+	require.Equal(t, operationrun.OperationRunStatusCancelled, store.updatedRun.Status)
+	require.Empty(t, store.updatedTargets)
+	require.Equal(t, operationrun.OperationRunTargetStatusSubmitted, target.Status)
+	require.Equal(t, "submitted", target.Message)
+}
+
+func TestCancelReturnsCancelledRunWhenSubmittedTargetDiscoveryFails(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := &mockStore{
+		lockRun: testLockedRun(
+			t,
+			runID,
+			operationrun.OperationRunStatusRunning,
+			operationrun.OperationRunStatusReasonNone,
+		),
+		listTargetsErr: fmt.Errorf("target list unavailable"),
+	}
+	canceller := &mockTaskCanceller{}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+
+	got, err := manager.Cancel(context.Background(), runID, "operator requested", canceller)
+
+	require.NoError(t, err)
+	require.Same(t, store.lockRun, got)
+	require.Equal(t, []string{
+		"lock_run",
+		"update_run",
+		"list_targets",
+	}, store.events)
+	require.Equal(t, operationrun.OperationRunStatusCancelled, store.updatedRun.Status)
+	require.Empty(t, canceller.cancelledTaskIDs)
+}
+
+func TestCancelTerminalRunIsNoOp(t *testing.T) {
+	runID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	store := &mockStore{
+		lockRun: testLockedRun(
+			t,
+			runID,
+			operationrun.OperationRunStatusCompleted,
+			operationrun.OperationRunStatusReasonNone,
+		),
+	}
+	canceller := &mockTaskCanceller{}
+	manager := newTestManager(t, store, planner.New(&mockTargetLookup{}, planner.Config{}))
+
+	got, err := manager.Cancel(context.Background(), runID, "operator requested", canceller)
+
+	require.NoError(t, err)
+	require.Same(t, store.lockRun, got)
+	require.Zero(t, store.lockTargetsCalls)
+	require.Zero(t, store.updateRunCalls)
+	require.Equal(t, []string{"lock_run"}, store.events)
+	require.Empty(t, store.updatedTargets)
+	require.Empty(t, canceller.cancelledTaskIDs)
+}
+
 type mockStore struct {
 	runID uuid.UUID
 
@@ -124,6 +443,16 @@ type mockStore struct {
 	createdTargets     []*operationrun.OperationRunTarget
 	getErr             error
 	listTargetsErr     error
+
+	lockRun          *operationrun.OperationRun
+	lockRunNil       bool
+	lockRunErr       error
+	lockedTargets    []*operationrun.OperationRunTarget
+	lockTargetsCalls int
+	updateRunCalls   int
+	updatedRun       *operationrun.OperationRun
+	updatedTargets   []*operationrun.OperationRunTarget
+	events           []string
 }
 
 func newTestManager(
@@ -158,6 +487,24 @@ func (m *mockStore) Get(
 	return nil, fmt.Errorf("not implemented")
 }
 
+func (m *mockStore) LockOperationRun(
+	ctx context.Context,
+	id uuid.UUID,
+) (*operationrun.OperationRun, error) {
+	m.events = append(m.events, "lock_run")
+	if m.lockRunErr != nil {
+		return nil, m.lockRunErr
+	}
+	if m.lockRunNil {
+		return nil, nil
+	}
+	if m.lockRun == nil {
+		return nil, fmt.Errorf("not implemented")
+	}
+
+	return m.lockRun, nil
+}
+
 func (m *mockStore) List(
 	ctx context.Context,
 	opts operationrun.ListOptions,
@@ -186,11 +533,43 @@ func (m *mockStore) ListTargets(
 	runID uuid.UUID,
 	opts operationrun.TargetListOptions,
 ) ([]*operationrun.OperationRunTarget, int32, error) {
+	m.events = append(m.events, "list_targets")
 	if m.listTargetsErr != nil {
 		return nil, 0, m.listTargetsErr
 	}
+	if m.lockedTargets != nil {
+		return m.lockedTargets, int32(len(m.lockedTargets)), nil
+	}
 
 	return nil, 0, fmt.Errorf("not implemented")
+}
+
+func (m *mockStore) LockOperationRunTargets(
+	ctx context.Context,
+	runID uuid.UUID,
+) ([]*operationrun.OperationRunTarget, error) {
+	m.events = append(m.events, "lock_targets")
+	m.lockTargetsCalls++
+	return m.lockedTargets, nil
+}
+
+func (m *mockStore) UpdateRunState(
+	ctx context.Context,
+	run *operationrun.OperationRun,
+) error {
+	m.events = append(m.events, "update_run")
+	m.updateRunCalls++
+	m.updatedRun = run
+	return nil
+}
+
+func (m *mockStore) UpdateTargetState(
+	ctx context.Context,
+	target *operationrun.OperationRunTarget,
+) error {
+	copied := *target
+	m.updatedTargets = append(m.updatedTargets, &copied)
+	return nil
 }
 
 func (m *mockStore) RunInTransaction(
@@ -308,6 +687,59 @@ func mustUUID(value string) uuid.UUID {
 		panic(err)
 	}
 	return id
+}
+
+func testLockedRun(
+	t *testing.T,
+	id uuid.UUID,
+	status operationrun.OperationRunStatus,
+	reason operationrun.OperationRunStatusReason,
+) *operationrun.OperationRun {
+	t.Helper()
+
+	run := testOperationRun(t)
+	run.ID = id
+	run.Status = status
+	run.StatusReason = reason
+	return run
+}
+
+func testOperationRunTarget(
+	runID uuid.UUID,
+	phase int32,
+	status operationrun.OperationRunTargetStatus,
+) *operationrun.OperationRunTarget {
+	return &operationrun.OperationRunTarget{
+		ID:             uuid.New(),
+		OperationRunID: runID,
+		RackID:         uuid.New(),
+		PhaseIndex:     phase,
+		Status:         status,
+	}
+}
+
+func testOperationRunTargetWithTask(
+	runID uuid.UUID,
+	phase int32,
+	status operationrun.OperationRunTargetStatus,
+	taskID uuid.UUID,
+) *operationrun.OperationRunTarget {
+	target := testOperationRunTarget(runID, phase, status)
+	target.TaskID = &taskID
+	return target
+}
+
+type mockTaskCanceller struct {
+	cancelledTaskIDs []uuid.UUID
+	cancelErr        error
+}
+
+func (m *mockTaskCanceller) CancelTask(
+	ctx context.Context,
+	taskID uuid.UUID,
+) error {
+	m.cancelledTaskIDs = append(m.cancelledTaskIDs, taskID)
+	return m.cancelErr
 }
 
 func targetPhaseIndexes(
