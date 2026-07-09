@@ -238,19 +238,19 @@ impl BmcProxy {
             .state
             .meter
             .u64_counter("carbide-bmc-proxy.tls.connection_attempted")
-            .with_description("The amount of tls connections that were attempted")
+            .with_description("Number of TLS connections that were attempted")
             .build();
         let connection_succeeded_counter = self
             .state
             .meter
             .u64_counter("carbide-bmc-proxy.tls.connection_success")
-            .with_description("The amount of tls connections that were successful")
+            .with_description("Number of TLS connections that were successful")
             .build();
         let connection_failed_counter = self
             .state
             .meter
             .u64_counter("carbide-bmc-proxy.tls.connection_fail")
-            .with_description("The amount of tcp connections that were failures")
+            .with_description("Number of inbound connections that failed")
             .build();
 
         while let Some(incoming_connection) = cancel_token

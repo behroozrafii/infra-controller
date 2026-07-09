@@ -306,7 +306,7 @@ pub async fn start(
         .build();
     let connection_failed_counter = meter
         .u64_counter("carbide-api.tls.connection_fail")
-        .with_description("The amount of tcp connections that were failures")
+        .with_description("Number of inbound connections that failed")
         .build();
 
     let mut tls_acceptor_created = Instant::now();

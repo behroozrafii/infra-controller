@@ -76,7 +76,7 @@ impl MqttHookMetrics {
     fn build_publish_count(meter: &Meter) -> Counter<u64> {
         meter
             .u64_counter("carbide_dsx_event_bus_publish_count")
-            .with_description("Total number of MQTT publish attempts")
+            .with_description("Number of MQTT publish attempts")
             .build()
     }
 

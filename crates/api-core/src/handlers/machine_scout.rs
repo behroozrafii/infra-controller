@@ -441,7 +441,7 @@ fn record_reboot_duration_metric(
     log = warn,
     metric = counter,
     message = "Failed to wake up state handler for machine",
-    describe = "The amount of times a machine's state handler could not be woken after a \
+    describe = "Number of times a machine's state handler could not be woken after a \
                 scout-reported event"
 )]
 struct StateHandlerWakeupFailed {

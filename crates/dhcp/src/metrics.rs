@@ -59,12 +59,12 @@ fn initialize_metrics(mconf: &MetricsSetup) -> CarbideDhcpMetrics {
         total_requests_counter: mconf
             .meter
             .u64_counter("carbide-dhcp.requests")
-            .with_description("The total number of DHCP requests")
+            .with_description("Number of DHCP requests")
             .build(),
         dropped_requests_counter: mconf
             .meter
             .u64_counter("carbide-dhcp.dropped_requests")
-            .with_description("The number of dropped DHCP requests")
+            .with_description("Number of dropped DHCP requests")
             .build(),
         forge_client_config: tls::build_forge_client_config(),
         certificate_expiration_value: certificate_expiration_value.clone(),

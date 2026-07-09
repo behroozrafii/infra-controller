@@ -258,9 +258,7 @@ impl HostFirmwareUpdateMetrics {
         let active_firmware_updates = self.active_firmware_updates.clone();
         meter
             .u64_observable_gauge("carbide_pending_host_firmware_update_count")
-            .with_description(
-                "The number of host machines in the system that need a firmware update.",
-            )
+            .with_description("Number of host machines in the system that need a firmware update.")
             .with_callback(move |observer| {
                 observer.observe(pending_firmware_updates.load(Ordering::Relaxed), &[])
             })
@@ -268,7 +266,7 @@ impl HostFirmwareUpdateMetrics {
         meter
             .u64_observable_gauge("carbide_active_host_firmware_update_count")
             .with_description(
-                "The number of host machines in the system currently working on updating their firmware.",
+                "Number of host machines in the system currently working on updating their firmware.",
             )
             .with_callback(move |observer|
                 observer.observe(active_firmware_updates.load(Ordering::Relaxed), &[]))

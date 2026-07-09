@@ -47,7 +47,7 @@ impl DpuNicFirmwareUpdateMetrics {
         let running_dpu_updates = self.running_dpu_updates.clone();
         meter
             .u64_observable_gauge("carbide_pending_dpu_nic_firmware_update_count")
-            .with_description("The number of machines in the system that need a firmware update.")
+            .with_description("Number of machines in the system that need a firmware update.")
             .with_callback(move |observer| {
                 observer.observe(pending_firmware_updates.load(Relaxed), &[]);
             })
@@ -56,7 +56,7 @@ impl DpuNicFirmwareUpdateMetrics {
         meter
             .u64_observable_gauge("carbide_unavailable_dpu_nic_firmware_update_count")
             .with_description(
-                "The number of machines in the system that need a firmware update but are unavailable for update.",
+                "Number of machines in the system that need a firmware update but are unavailable for update.",
             )
             .with_callback(move |observer| {
                 observer.observe(unavailable_dpu_updates.load(Relaxed), &[]);
@@ -66,7 +66,7 @@ impl DpuNicFirmwareUpdateMetrics {
         meter
             .u64_observable_gauge("carbide_running_dpu_updates_count")
             .with_description(
-                "The number of machines in the system that are running a firmware update.",
+                "Number of machines in the system that are running a firmware update.",
             )
             .with_callback(move |observer| {
                 observer.observe(running_dpu_updates.load(Relaxed), &[]);

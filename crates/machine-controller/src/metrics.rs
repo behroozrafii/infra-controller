@@ -124,7 +124,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_gpus_total_count")
-                .with_description("The total number of GPUs available in the NICo deployment")
+                .with_description("Number of GPUs available in the NICo deployment")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         observer.observe(metrics.gpus_total as u64, attrs);
@@ -136,7 +136,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_hosts_usable_count")
-                .with_description("The remaining number of hosts in the NICo deployment which are available for immediate instance creation")
+                .with_description("Number of remaining hosts in the NICo deployment which are available for immediate instance creation")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         observer.observe(
@@ -151,7 +151,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_gpus_usable_count")
-                .with_description("The remaining number of GPUs in the NICo deployment which are available for immediate instance creation")
+                .with_description("Number of remaining GPUs in the NICo deployment which are available for immediate instance creation")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         observer.observe(
@@ -166,7 +166,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_gpus_in_use_count")
-                .with_description("The total number of GPUs that are actively used by tenants in instances in the NICo deployment")
+                .with_description("Number of GPUs that are actively used by tenants in instances in the NICo deployment")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         let total_in_use_gpus = metrics.gpus_in_use_by_tenant.values().copied().reduce(|a,b| a + b).unwrap_or_default();
@@ -182,7 +182,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_hosts_in_use_count")
-                .with_description("The total number of hosts that are actively used by tenants as instances in the NICo deployment")
+                .with_description("Number of hosts that are actively used by tenants as instances in the NICo deployment")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         let total_in_use_hosts = metrics.hosts_in_use_by_tenant.values().copied().reduce(|a,b| a + b).unwrap_or_default();
@@ -199,7 +199,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             meter
                 .u64_observable_gauge("carbide_gpus_in_use_by_tenant_count")
                 .with_description(
-                    "The number of GPUs that are actively used by tenants as instances - by tenant",
+                    "Number of GPUs that are actively used by tenants as instances - by tenant",
                 )
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
@@ -219,14 +219,15 @@ impl MetricsEmitter for MachineMetricsEmitter {
             meter
                 .u64_observable_gauge("carbide_hosts_in_use_by_tenant_count")
                 .with_description(
-                    "The number of hosts that are actively used by tenants as instances - by tenant",
+                    "Number of hosts that are actively used by tenants as instances - by tenant",
                 )
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         for (org, count) in &metrics.hosts_in_use_by_tenant {
                             observer.observe(
                                 *count as u64,
-                                &[attrs, &[KeyValue::new("tenant_org_id", org.to_string())]].concat(),
+                                &[attrs, &[KeyValue::new("tenant_org_id", org.to_string())]]
+                                    .concat(),
                             );
                         }
                     })
@@ -237,7 +238,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_dpus_up_count")
-                .with_description("The total number of DPUs in the system that are up. Up means we have received a health report less than 5 minutes ago.")
+                .with_description("Number of DPUs in the system that are up. Up means we have received a health report less than 5 minutes ago.")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         observer.observe(
@@ -252,7 +253,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_dpus_healthy_count")
-                .with_description("The total number of DPUs in the system that have reported healthy in the last report. Healthy does not imply up - the report from the DPU might be outdated.")
+                .with_description("Number of DPUs in the system that have reported healthy in the last report. Healthy does not imply up - the report from the DPU might be outdated.")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         observer.observe(
@@ -288,9 +289,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_dpu_health_check_failed_count")
-                .with_description(
-                    "The total number of DPUs in the system that have failed a health-check.",
-                )
+                .with_description("Number of DPUs in the system that have failed a health-check.")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         for ((probe, target), count) in &metrics.unhealthy_dpus_by_probe_id {
@@ -324,7 +323,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             meter
                 .u64_observable_gauge("carbide_hosts_by_sku_count")
                 .with_description(
-                    "The amount of hosts by SKU and device type ('unknown' for hosts without SKU)",
+                    "Number of hosts by SKU and device type ('unknown' for hosts without SKU)",
                 )
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
@@ -348,7 +347,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_dpu_agent_version_count")
-                .with_description("The amount of DPU agents which have reported a certain version.")
+                .with_description("Number of DPU agents which have reported a certain version.")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         for (version, count) in &metrics.agent_versions {
@@ -369,9 +368,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             let metrics = shared_metrics.clone();
             meter
                 .u64_observable_gauge("carbide_dpu_firmware_version_count")
-                .with_description(
-                    "The amount of DPUs which have reported a certain firmware version.",
-                )
+                .with_description("Number of DPUs which have reported a certain firmware version.")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
                         for (version, count) in &metrics.dpu_firmware_versions {
@@ -391,7 +388,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             meter
                 .u64_observable_gauge("carbide_machine_inventory_component_version_count")
                 .with_description(
-                    "The amount of machines report software components with a certain version.",
+                    "Number of machines that report software components with a certain version.",
                 )
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
@@ -437,12 +434,12 @@ impl MetricsEmitter for MachineMetricsEmitter {
 
         let machine_reboot_attempts_in_booting_with_discovery_image = meter
             .u64_histogram("carbide_reboot_attempts_in_booting_with_discovery_image")
-            .with_description("The amount of machines rebooted again in BootingWithDiscoveryImage since there is no response after a certain time from host.")
+            .with_description("Number of machines rebooted again in BootingWithDiscoveryImage since there is no response after a certain time from host.")
             .build();
 
         let machine_reboot_attempts_in_failed_during_discovery = meter
             .u64_histogram("carbide_reboot_attempts_in_failed_during_discovery")
-            .with_description("The amount of machines rebooted again in Failed state due to discovery failure since there is no response after a certain time from host.")
+            .with_description("Number of machines rebooted again in Failed state due to discovery failure since there is no response after a certain time from host.")
             .build();
 
         {
@@ -450,7 +447,7 @@ impl MetricsEmitter for MachineMetricsEmitter {
             meter
                 .u64_observable_gauge("carbide_hosts_with_bios_password_set")
                 .with_description(
-                    "The total number of Hosts in the system that have their BIOS password set.",
+                    "Number of Hosts in the system that have their BIOS password set.",
                 )
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {

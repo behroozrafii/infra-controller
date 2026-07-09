@@ -73,7 +73,7 @@ impl AgentMetricsState {
 pub fn create_metrics(meter: Meter) -> Arc<AgentMetricsState> {
     let http_counter = meter
         .u64_counter("http_requests")
-        .with_description("Total number of HTTP requests made.")
+        .with_description("Number of HTTP requests made.")
         .build();
     let http_req_latency_histogram: Histogram<f64> = meter
         .f64_histogram("request_latency")

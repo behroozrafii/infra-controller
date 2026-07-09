@@ -40,7 +40,7 @@ fn hydrate_meter(meter: Meter, shared_metrics: SharedMetricsHolder<PreingestionM
         meter
             .u64_observable_gauge("carbide_preingestion_total")
             .with_description(
-                "The amount of known machines currently being evaluated prior to ingestion",
+                "Number of known machines currently being evaluated prior to ingestion",
             )
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -55,7 +55,7 @@ fn hydrate_meter(meter: Meter, shared_metrics: SharedMetricsHolder<PreingestionM
         meter
                 .u64_observable_gauge("carbide_preingestion_waiting_installation")
                 .with_description(
-                    "The amount of machines which have had firmware uploaded to them and are currently in the process of installing that firmware"
+                    "Number of machines which have had firmware uploaded to them and are currently in the process of installing that firmware"
                 ).with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     observer.observe(metrics.waiting_for_installation as u64, attrs)
@@ -67,7 +67,7 @@ fn hydrate_meter(meter: Meter, shared_metrics: SharedMetricsHolder<PreingestionM
         let metrics = shared_metrics;
         meter
             .u64_observable_gauge("carbide_preingestion_waiting_download")
-            .with_description("The amount of machines that are waiting for firmware downloads on other machines to complete before doing their own")
+            .with_description("Number of machines that are waiting for firmware downloads on other machines to complete before doing their own")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     observer.observe(

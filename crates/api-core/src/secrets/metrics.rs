@@ -37,7 +37,7 @@ impl SecretsMetrics {
         Self {
             requests: meter
                 .u64_counter("carbide-api.secrets.requests")
-                .with_description("Total number of Postgres secrets operations attempted.")
+                .with_description("Number of Postgres secrets operations attempted.")
                 .build(),
             successes: meter
                 .u64_counter("carbide-api.secrets.requests.succeeded")

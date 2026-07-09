@@ -203,7 +203,7 @@ impl NvlPartitionMonitorInstruments {
                 .u64_observable_gauge(
                     "carbide_nvlink_partition_monitor_machine_status_updates_count",
                 )
-                .with_description("Number of machines nvlink_status_observation got updated")
+                .with_description("Number of machines whose NVLink status observation was updated")
                 .with_callback(move |o| {
                     metrics.if_available(|metrics, attrs| {
                         o.observe(metrics.num_machine_nvl_status_updates as u64, attrs);

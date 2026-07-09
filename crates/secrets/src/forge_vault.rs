@@ -1040,15 +1040,15 @@ pub fn create_vault_client(
 
     let vault_requests_total_counter = meter
         .u64_counter("carbide-api.vault.requests_attempted")
-        .with_description("The amount of tls connections that were attempted")
+        .with_description("Number of vault requests attempted")
         .build();
     let vault_requests_succeeded_counter = meter
         .u64_counter("carbide-api.vault.requests_succeeded")
-        .with_description("The amount of tls connections that were successful")
+        .with_description("Number of vault requests that succeeded")
         .build();
     let vault_requests_failed_counter = meter
         .u64_counter("carbide-api.vault.requests_failed")
-        .with_description("The amount of tcp connections that were failures")
+        .with_description("Number of vault requests that failed")
         .build();
     let vault_token_time_remaining_until_refresh_gauge = meter
         .f64_gauge("carbide-api.vault.token_time_until_refresh")
