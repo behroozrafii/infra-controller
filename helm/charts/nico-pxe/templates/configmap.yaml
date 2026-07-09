@@ -6,8 +6,14 @@ metadata:
   labels:
     {{- include "nico-pxe.labels" . | nindent 4 }}
 data:
-  NICO_API_HOST: {{ printf "%s.%s.svc.cluster.local" .Values.apiServiceName (include "nico-pxe.namespace" .) | quote }}
-  NICO_API_PORT: {{ .Values.config.nicoApiPort | default "1079" | quote }}
+  {{- $apiHost := printf "%s.%s.svc.cluster.local" .Values.apiServiceName (include "nico-pxe.namespace" .) }}
+  {{- $apiPort := .Values.config.nicoApiPort | default "1079" | toString }}
+  NICO_API_HOST: {{ $apiHost | quote }}
+  NICO_API_PORT: {{ $apiPort | quote }}
+  {{- /* Default to internal mTLS URL unless explicitly overridden by exact-case extraEnvData. */}}
+  {{- if not (hasKey .Values.config.extraEnvData "CARBIDE_API_INTERNAL_URL") }}
+  CARBIDE_API_INTERNAL_URL: {{ printf "https://%s:%s" $apiHost $apiPort | quote }}
+  {{- end }}
   {{- range $key, $value := .Values.config.extraEnvData }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}
