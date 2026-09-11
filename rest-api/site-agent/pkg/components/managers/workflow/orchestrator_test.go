@@ -20,10 +20,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/bootstrap"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes"
 )
 
 func TestWorkflowOrchestrator(t *testing.T) {
@@ -69,13 +69,11 @@ func TestWorkflowOrchestrator(t *testing.T) {
 				t.Setenv("GODEBUG", os.Getenv("GODEBUG")+",x509keypairleaf=0")
 			}
 			previousAccess := ManagerAccess
-			previousBootstrapAccess := bootstrap.ManagerAccess
-			previousGauge := bootstrap.CertExpirationMetric
+			previousGauge := CertExpirationMetric
 			previousRegisterer := prometheus.DefaultRegisterer
 			t.Cleanup(func() {
 				ManagerAccess = previousAccess
-				bootstrap.ManagerAccess = previousBootstrapAccess
-				bootstrap.CertExpirationMetric = previousGauge
+				CertExpirationMetric = previousGauge
 				prometheus.DefaultRegisterer = previousRegisterer
 			})
 
@@ -90,11 +88,10 @@ func TestWorkflowOrchestrator(t *testing.T) {
 					TemporalCertPath: t.TempDir(),
 				},
 			}
-			data := &elektratypes.Elektra{Log: zerolog.Nop()}
+			data := &elektratypes.Elektra{Log: zerolog.Nop(), Managers: managertypes.NewManagerType()}
 			managerConf := &managerapi.ManagerConf{EB: conf}
-			bootstrap.NewBootstrapManager(data, nil, managerConf).Init()
-			NewWorkflowManager(data, nil, managerConf)
-			gauge := bootstrap.CertExpirationMetric
+			NewWorkflowManager(data, nil, managerConf).Init()
+			gauge := CertExpirationMetric
 			gaugeValue := func() float64 {
 				t.Helper()
 				metric := &dto.Metric{}
@@ -104,7 +101,7 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			}
 			require.Zero(t, gaugeValue())
 			if tt.nilGauge {
-				bootstrap.CertExpirationMetric = nil
+				CertExpirationMetric = nil
 			}
 
 			writeCertificate := func(notAfter time.Time) {
@@ -151,8 +148,17 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			assert.Equal(t, float64(expiration.Unix()), gaugeValue())
 			metrics, gatherErr := registry.Gather()
 			require.NoError(t, gatherErr)
-			require.Len(t, metrics, 1)
-			assert.Equal(t, "nico_rest_site_agent_temporal_cert_expiration", metrics[0].GetName())
+			require.Len(t, metrics, 4)
+			var expirationMetric *dto.MetricFamily
+			for _, metric := range metrics {
+				if metric.GetName() == "nico_rest_site_agent_temporal_cert_expiration" {
+					expirationMetric = metric
+					break
+				}
+			}
+			require.NotNil(t, expirationMetric)
+			require.Len(t, expirationMetric.GetMetric(), 1)
+			assert.Equal(t, float64(expiration.Unix()), expirationMetric.GetMetric()[0].GetGauge().GetValue())
 			if tt.failedReload {
 				err = os.WriteFile(conf.Temporal.GetTemporalClientKeyFullPath(), []byte("invalid PEM"), 0600)
 				require.NoError(t, err)
