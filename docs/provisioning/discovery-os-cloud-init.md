@@ -111,7 +111,7 @@ carbide_pxe_boot_outcomes_total{endpoint="cloud_init_scout",reason="snippet_dire
 Use this signal to distinguish an unconfigured site from a configured directory
 that PXE cannot read.
 
-## Compose multiple snippets safely
+### Compose multiple snippets safely
 
 Each cloud-config snippet is a separate cloud-config document. When cloud-init
 merges these documents, it replaces lists rather than appending them by
