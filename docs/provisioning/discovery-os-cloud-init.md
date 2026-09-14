@@ -1,4 +1,4 @@
-# Discovery OS cloud-init (Scout) <Badge intent="info">v2.2</Badge>
+# Discovery OS cloud-init (Scout) <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Scout is the NVIDIA Infra Controller (NICo) discovery OS. PXE exposes Scout's
 NoCloud datasource URL through the internal iPXE variable
