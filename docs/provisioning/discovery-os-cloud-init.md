@@ -191,5 +191,5 @@ PXE sets `local-hostname` only when the resolved machine interface has a
 non-empty hostname. Otherwise, the field is omitted so cloud-init can apply its
 own hostname behavior.
 
-For the complete host discovery workflow, see [Ingesting
+For the complete host discovery workflow, Refer to [Ingesting
 Hosts](ingesting-hosts.md).
