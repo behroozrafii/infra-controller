@@ -23,10 +23,10 @@ clean root filesystem, so effects outside that filesystem must be safe to
 repeat. Examples include calling an API, modifying BMC or firmware state,
 writing to persistent storage, or consuming a license seat.
 
-Do not put secrets in snippets. PXE serves them through `/public` without
-authentication, so any client that can reach the service can read them. If a
-snippet needs privileged material, retrieve it at runtime from an authenticated
-source.
+Do not put secrets such as passwords, tokens, or private keys in snippets. PXE
+serves them through `/public` without authentication, so any client that can
+reach the service can read them. If a snippet needs privileged material,
+retrieve it at runtime from an authenticated source.
 
 ## Create and Name the Snippets
 
@@ -53,7 +53,7 @@ Place the snippets under:
 <PXE static directory>/blobs/internal/cloud-init.d/scout
 ```
 
-### Use the `nico-pxe` Helm chart
+### Use the `nico-pxe` Helm Chart
 
 The shipped `nico-pxe` chart does not expose arbitrary volumes or volume mounts
 for the PXE container, so a ConfigMap cannot be mounted at the snippet path
