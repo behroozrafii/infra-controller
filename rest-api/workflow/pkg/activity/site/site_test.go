@@ -45,6 +45,7 @@ import (
 	tosv1mock "go.temporal.io/api/operatorservicemock/v1"
 	twsv1mock "go.temporal.io/api/workflowservicemock/v1"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -158,6 +159,29 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 
 	// Site 2 where the Machine components will be purged
 	site2 := util.TestBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusPending, nil, ipu)
+	ipBlockDAO := cdbm.NewIPBlockDAO(dbSession)
+	sitePrefixInput := cdbm.IPBlockCreateInput{
+		Name:                     "target-tenant-site-prefix",
+		SiteID:                   site.ID,
+		InfrastructureProviderID: ip.ID,
+		TenantID:                 &tenant.ID,
+		SitePrefixID:             cutil.GetPtr(uuid.New()),
+		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
+		Prefix:                   "10.60.0.0",
+		PrefixLength:             24,
+		ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
+		Status:                   cdbm.IPBlockStatusReady,
+		CreatedBy:                &ipu.ID,
+	}
+	targetIPBlock, err := ipBlockDAO.Create(ctx, nil, sitePrefixInput)
+	require.NoError(t, err)
+	sitePrefixInput.Name = "retained-tenant-site-prefix"
+	sitePrefixInput.SiteID = site2.ID
+	sitePrefixInput.SitePrefixID = cutil.GetPtr(uuid.New())
+	sitePrefixInput.Prefix = "10.61.0.0"
+	retainedIPBlock, err := ipBlockDAO.Create(ctx, nil, sitePrefixInput)
+	require.NoError(t, err)
+
 	vpc2 := util.TestBuildVpc(t, dbSession, ip, site2, tenant, "test-vpc-2")
 	machine3 := util.TestBuildMachine(t, dbSession, ip.ID, site2.ID, cutil.GetPtr("mcTypeTest2"), cutil.GetPtr(true), cdbm.MachineStatusReady)
 	machine4 := util.TestBuildMachine(t, dbSession, ip.ID, site2.ID, cutil.GetPtr("mcTypeTest3"), cutil.GetPtr(true), cdbm.MachineStatusReady)
@@ -242,6 +266,7 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 		want           error
 		wantErr        bool
 		expectDeletion bool
+		checkIPBlocks  func(*testing.T)
 	}{
 		{
 			name: "test Site delete component activity successfully completed",
@@ -262,6 +287,15 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 			},
 			want:           nil,
 			expectDeletion: true,
+			checkIPBlocks: func(t *testing.T) {
+				var deleted cdbm.IPBlock
+				err := dbSession.DB.NewSelect().Model(&deleted).Where("ipb.id = ?", targetIPBlock.ID).WhereAllWithDeleted().Scan(ctx)
+				require.NoError(t, err)
+				require.NotNil(t, deleted.Deleted)
+				active, err := ipBlockDAO.GetByID(ctx, nil, retainedIPBlock.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, retainedIPBlock.ID, active.ID)
+			},
 		},
 		{
 			name: "test Site delete component activity successfully completed when site doesn't exits",
@@ -311,6 +345,10 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
+			}
+			require.NoError(t, err)
+			if tt.checkIPBlocks != nil {
+				tt.checkIPBlocks(t)
 			}
 
 			// Check if the VPC was deleted in the DB
@@ -1259,6 +1297,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 		siteAgentBuildInfo    *corev1.SiteAgentBuildInfo
 		wantVersion           *string
 		wantVpcSlaac          bool
+		wantFlow              bool
 		wantAgentVersion      *string
 		wantInterval          *int
 		wantDBUpdate          bool
@@ -1296,10 +1335,11 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			// An older Site Agent reports nothing about itself, which must not erase what an
 			// earlier report established.
 			name:             "leaves Site Agent values alone when nothing is reported",
-			existingConfig:   &cdbm.SiteConfig{},
+			existingConfig:   &cdbm.SiteConfig{Flow: true},
 			existingInterval: cutil.GetPtr(180),
 			buildInfo:        &corev1.BuildInfo{},
 			wantInterval:     cutil.GetPtr(180),
+			wantFlow:         true,
 		},
 		{
 			name:               "keeps the stored interval when the report omits it",
@@ -1420,6 +1460,43 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			wantDBUpdate:    true,
 		},
 		{
+			name:               "enables Flow when Site Agent reports it enabled",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion, FlowEnabled: proto.Bool(true)},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantFlow:           true,
+			wantDBUpdate:       true,
+		},
+		{
+			name:               "disables Flow when Site Agent reports it disabled",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{Flow: true},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion, FlowEnabled: proto.Bool(false)},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantDBUpdate:       true,
+		},
+		{
+			name:               "preserves Flow when queued Site inventory omits configuration",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{Flow: true},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantFlow:           true,
+		},
+		{
+			name:               "skips update when reported Flow configuration matches",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{Flow: true},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion, FlowEnabled: proto.Bool(true)},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantFlow:           true,
+		},
+		{
 			name:            "initializes nil config with advertised VPC SLAAC",
 			existingVersion: cutil.GetPtr("1.0.0"),
 			existingConfig:  nil,
@@ -1502,6 +1579,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			}
 			require.NotNil(t, got.Config)
 			assert.Equal(t, tt.wantVpcSlaac, got.Config.VpcSlaac)
+			assert.Equal(t, tt.wantFlow, got.Config.Flow)
 
 			// A nil expectation means the report left the stored value as createSite wrote it.
 			wantAgentVersion := existingAgentVersion
@@ -1712,7 +1790,14 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_ReturnsErrorWhenFabricB
 	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
 
 	err := cdb.WithTx(ctx, resources.dbSession, func(tx *cdb.Tx) error {
-		require.NoError(t, tx.AcquireAdvisoryLock(ctx, getSiteFabricIPBlockLockID(resources.site), false))
+		require.NoError(t, tx.AcquireAdvisoryLock(
+			ctx,
+			cdbm.SiteFabricIPBlockLockID(
+				resources.site.InfrastructureProviderID,
+				resources.site.ID,
+			),
+			false,
+		))
 
 		derr := mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.0.0.0/16"})
 		assert.ErrorIs(t, derr, cdb.ErrXactAdvisoryLockFailed)

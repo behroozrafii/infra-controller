@@ -56,7 +56,9 @@ func NormalizeAPIVpcRoutingProfileForSite(routingProfile string) string {
 	return routingProfile
 }
 
-func normalizeAPIVpcRoutingProfileFromSite(routingProfile string) string {
+// NormalizeAPIVpcRoutingProfileFromSite converts known site-controller routing
+// profile values to the REST API spelling.
+func NormalizeAPIVpcRoutingProfileFromSite(routingProfile string) string {
 	if mapped, ok := apiVpcRoutingProfileFromSiteMap[routingProfile]; ok {
 		return mapped
 	}
@@ -282,8 +284,8 @@ type APIVpcCreateRequest struct {
 	// RoutingProfile specifies the routing profile for the VPC.
 	// This is only supported when `networkVirtualizationType` is `FNN`, or when
 	// `networkVirtualizationType` is omitted and the Site has native networking enabled.
-	// This requires the Tenant to have elevated privileges. Current accepted values
-	// are `privileged-internal`, `internal`, and `external`.
+	// This requires the Tenant to have elevated privileges. The selected value must
+	// be one of the Site-configured profiles returned for the Tenant.
 	RoutingProfile *string `json:"routingProfile"`
 	// RoutingProfileOverrides replaces selected properties from the VPC's named routing profile.
 	RoutingProfileOverrides *APIVpcRoutingProfileOverrides `json:"routingProfileOverrides"`
@@ -334,12 +336,6 @@ func (ascr APIVpcCreateRequest) Validate() error {
 	}
 
 	if ascr.RoutingProfile != nil {
-		if _, ok := apiVpcRoutingProfileToSiteMap[*ascr.RoutingProfile]; !ok {
-			return validation.Errors{
-				"routingProfile": fmt.Errorf("`routingProfile` must be one of %s, %s, or %s", APIVpcRoutingProfilePrivilegedInternal, APIVpcRoutingProfileInternal, APIVpcRoutingProfileExternal),
-			}
-		}
-
 		if ascr.NetworkVirtualizationType != nil && !cdbm.VpcTypeSupportsRoutingProfile(ascr.NetworkVirtualizationType) {
 			return validation.Errors{
 				"routingProfile": errors.New("`routingProfile` is only supported when `networkVirtualizationType` is FNN"),
@@ -537,7 +533,7 @@ type APIVpc struct {
 	// ControllerVpcID is the ID of the corresponding VPC in Site Controller
 	ControllerVpcID *string `json:"controllerVpcId"`
 	// Labels is VPC labels specified by user
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// NVLinkLogicalPartitionID is the ID of the NVLinkLogicalPartition
 	NVLinkLogicalPartitionID *string `json:"nvLinkLogicalPartitionId"`
 	// NVLinkLogicalPartitionSummary is the summary of the NVLinkLogicalPartition
@@ -583,7 +579,7 @@ func NewAPIVpc(dbVpc cdbm.Vpc, dbsds []cdbm.StatusDetail, includeEffectiveRoutin
 		InfrastructureProviderID:               util.GetUUIDPtrToStrPtr(&dbVpc.InfrastructureProviderID),
 		TenantID:                               util.GetUUIDPtrToStrPtr(&dbVpc.TenantID),
 		SiteID:                                 util.GetUUIDPtrToStrPtr(&dbVpc.SiteID),
-		Labels:                                 dbVpc.Labels,
+		Labels:                                 APILabels(dbVpc.Labels),
 		Status:                                 dbVpc.Status,
 		NetworkSecurityGroupID:                 dbVpc.NetworkSecurityGroupID,
 		NetworkSecurityGroupPropagationDetails: NewAPINetworkSecurityGroupPropagationDetails(dbVpc.NetworkSecurityGroupPropagationDetails),
@@ -600,7 +596,7 @@ func NewAPIVpc(dbVpc cdbm.Vpc, dbsds []cdbm.StatusDetail, includeEffectiveRoutin
 	}
 
 	if dbVpc.RoutingProfile != nil {
-		routingProfile := normalizeAPIVpcRoutingProfileFromSite(*dbVpc.RoutingProfile)
+		routingProfile := NormalizeAPIVpcRoutingProfileFromSite(*dbVpc.RoutingProfile)
 		apivpc.RoutingProfile = &routingProfile
 	}
 

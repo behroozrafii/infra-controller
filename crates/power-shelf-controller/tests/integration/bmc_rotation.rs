@@ -118,6 +118,7 @@ fn power_shelf_services(
         per_object_metrics_registry: env.per_object_metrics_registry.clone(),
         rack_firmware_reprovisioning_enabled: false,
         redfish_client_pool: env.redfish_sim.clone(),
+        bmc_credential_ops: env.redfish_sim.clone(),
         bmc_rotation_gate: RotationGate::new_for_family(CredentialRotationType::Bmc),
         bmc_rotation_enabled,
     }
@@ -201,9 +202,13 @@ async fn stage_lagging_pmc(env: &ControllerEnv, pool: &PgPool, pmc_mac: MacAddre
     {
         let mut conn = pool.acquire().await?;
         record_device_converged(&mut conn, pmc_mac, BMC).await?;
-        set_next_target_version(&mut conn, BMC, 0, serde_json::json!({}))
-            .await?
-            .expect("target must advance from version 0");
+        assert!(
+            matches!(
+                set_next_target_version(&mut conn, BMC, 0, serde_json::json!({})).await?,
+                db::ConditionalWrite::Applied(_)
+            ),
+            "target must advance from version 0"
+        );
     }
     env.credential_manager
         .set_credentials(&rotate_to_key(1), &creds("root", "new"))
@@ -264,9 +269,13 @@ async fn failing_pmc_rotation_returns_to_ready_and_quarantines(pool: PgPool) -> 
     {
         let mut conn = pool.acquire().await?;
         record_device_converged(&mut conn, pmc_mac, BMC).await?;
-        set_next_target_version(&mut conn, BMC, 0, serde_json::json!({}))
-            .await?
-            .expect("target must advance from version 0");
+        assert!(
+            matches!(
+                set_next_target_version(&mut conn, BMC, 0, serde_json::json!({})).await?,
+                db::ConditionalWrite::Applied(_)
+            ),
+            "target must advance from version 0"
+        );
     }
 
     // Iteration 1: Ready observes the lag and enters RotatingBmc.

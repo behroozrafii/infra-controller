@@ -158,6 +158,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetCurrentTenantStatsHandler(dbSession, tc, cfg),
 		},
+		{
+			Path:    apiPathPrefix + "/tenant/current/routing-profile",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetCurrentTenantRoutingProfileHandler(dbSession, scp),
+		},
 		// Tenant Instance Type Stats endpoint
 		{
 			Path:    apiPathPrefix + "/tenant/instance-type/stats",
@@ -251,6 +256,21 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/vpc/:id/virtualization",
 			Method:  http.MethodPatch,
 			Handler: apiHandler.NewUpdateVPCVirtualizationHandler(dbSession, tc, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/vpc/:id/routing-profile",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetVPCRoutingProfileHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/vpc/:id/routing-profile",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateVPCRoutingProfileHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/vpc/:id/routing-profile/release-inactive-vni",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewReleaseVPCInactiveVniHandler(dbSession, scp),
 		},
 
 		// VpcPrefix endpoints
@@ -451,6 +471,28 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteInfiniBandPartitionHandler(dbSession, tc, scp, cfg),
 		},
+		// SpectrumXPartition endpoints. These reach Core through the generic gRPC proxy
+		// rather than per-Site workflows, so they take no Temporal client.
+		{
+			Path:    apiPathPrefix + "/spectrumx-partition",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCreateSpectrumXPartitionHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/spectrumx-partition",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllSpectrumXPartitionHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/spectrumx-partition/:id",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetSpectrumXPartitionHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/spectrumx-partition/:id",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteSpectrumXPartitionHandler(dbSession, scp, cfg),
+		},
 		// NVLinkLogicalPartition endpoints
 		{
 			Path:    apiPathPrefix + "/nvlink-logical-partition",
@@ -497,6 +539,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/expected-machine/batch",
 			Method:  http.MethodPatch,
 			Handler: apiHandler.NewUpdateExpectedMachinesHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-machine/label/key",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllExpectedMachineLabelKeyHandler(dbSession),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-machine/label/key/:key/value",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllExpectedMachineLabelValueHandler(dbSession),
 		},
 		{
 			Path:    apiPathPrefix + "/expected-machine/:id",
@@ -617,6 +669,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/machine",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetAllMachineHandler(dbSession, tc, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/label/key",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllMachineLabelKeyHandler(dbSession),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/label/key/:key/value",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllMachineLabelValueHandler(dbSession),
 		},
 		{
 			Path:    apiPathPrefix + "/machine/:id",
