@@ -201,18 +201,20 @@ that PXE cannot read.
 
 ### Scout Wait and Timeout Behavior
 
-In service mode, before registering the machine and proceeding with discovery,
-Scout runs `cloud-init status --wait --long`. In a normal cloud-init run, every
-snippet has finished, either successfully or with errors, before Scout proceeds.
+Scout runs in service mode on the discovery OS; it is the default `--mode`.
+Before registering the machine and proceeding with discovery, Scout runs
+`cloud-init status --wait --long`. In a normal cloud-init run, every snippet has
+finished, either successfully or with errors, before Scout proceeds.
 
-In standalone mode, Scout registers without performing this cloud-init wait, so
-the 600-second backstop does not apply.
+Scout waits for at most 600 seconds. If the status command has not returned by
+then, Scout stops waiting and continues with registration. Timing out the
+status command does not stop `cloud-final.service`, so a long-running snippet
+can still be running when Scout proceeds after this backstop.
 
-In service mode, Scout waits for at most 600 seconds. If the status command has
-not returned by then, Scout stops waiting and continues with registration.
-Timing out the status command does not stop `cloud-final.service`, so a
-long-running snippet can still be running when Scout proceeds after this
-backstop.
+Standalone mode (`forge-scout --mode=standalone`, used by the BlueField BFB
+install flow) registers without this wait. The standalone BlueField flow does
+not use the Scout cloud-init datasource, so the snippets documented on this
+page do not apply to it.
 
 Independently, cloud-init processes configuration in systemd-managed stages.
 Final-stage modules, including `runcmd`, run under `cloud-final.service` and are
