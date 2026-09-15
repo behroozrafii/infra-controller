@@ -1,34 +1,59 @@
 # Discovery OS cloud-init (Scout) <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
-Scout is the NVIDIA Infra Controller (NICo) discovery OS. PXE exposes Scout's
-NoCloud datasource URL through the internal iPXE variable
-`${scout-cloudinit-url}`. The Scout boot instruction passes it on the kernel
-command line as `ds=nocloud;s=${scout-cloudinit-url}`. The datasource endpoint
-is `/api/v0/cloud-init/scout/`. The PXE service provides `user-data` and
-`meta-data` at this prefix. It does not provide `vendor-data`.
+Scout is the NVIDIA Infra Controller (NICo) discovery OS. Site operators can
+use cloud-init snippets to customize Scout during discovery boots. Most sites
+do not need this customization; when no snippets are configured, PXE serves a
+valid no-op cloud-config document.
 
-Most sites do not need to customize Scout. The datasource is always available,
-but configuring site-specific content is optional. When no content is
-configured, PXE serves a valid no-op cloud-config document.
+## Before You Begin
 
-## Configure Scout snippets
+<Warning>
+Never reboot a host from a Scout snippet. Scout runs from a RAMdisk, so a reboot
+causes a full re-PXE, discards the current root filesystem, and runs the same
+snippets again. A snippet that reboots can create an endless discovery boot
+loop.
+</Warning>
 
-Place site-specific cloud-config snippets in
-`<PXE static directory>/blobs/internal/cloud-init.d/scout`.
+Changes that require a reboot, such as kernel parameters, module changes, or
+firmware activation, belong in the Scout image or in a later lifecycle state
+that owns the reboot.
 
-PXE lists the servable files in filename order and renders `user-data` as a
-cloud-init `#include` document containing their URLs. Cloud-init fetches and
-processes each included document in that order. The snippets themselves are
-served from `/public/blobs/internal/cloud-init.d/scout/`, which is
-unauthenticated.
+Make every snippet idempotent. Snippets run on every discovery boot against a
+clean root filesystem, so effects outside that filesystem must be safe to
+repeat. Examples include calling an API, modifying BMC or firmware state,
+writing to persistent storage, or consuming a license seat.
 
-Each included file must use a format that cloud-init recognizes. In particular,
-a cloud-config snippet must begin with `#cloud-config`.
+Do not put secrets in snippets. PXE serves them through `/public` without
+authentication, so any client that can reach the service can read them. If a
+snippet needs privileged material, retrieve it at runtime from an authenticated
+source.
+
+## Create and Name the Snippets
+
+Create one or more files containing user-data that cloud-init recognizes. A
+cloud-config snippet must begin with `#cloud-config`.
+
+Use filenames that:
+
+- Are not empty.
+- Contain only ASCII letters, digits, `.`, `_`, and `-`.
+- Sort in the order in which cloud-init should process them.
+
+For example, `10-site-validation.yaml` is a valid filename. Numeric prefixes
+such as `10-`, `20-`, and `30-` make the processing order clear.
 
 PXE validates filenames and file types, but it does not parse or validate the
 snippet contents.
 
-### Populate snippets with the `nico-pxe` Helm chart
+## Deploy the Snippets
+
+Place the snippets under:
+
+```text
+<PXE static directory>/blobs/internal/cloud-init.d/scout
+```
+
+### Use the `nico-pxe` Helm chart
 
 The shipped `nico-pxe` chart does not expose arbitrary volumes or volume mounts
 for the PXE container, so a ConfigMap cannot be mounted at the snippet path
@@ -69,49 +94,7 @@ For deployments outside this chart, use any mount or copy mechanism that puts
 the snippets under `<PXE static directory>/blobs/internal/cloud-init.d/scout`.
 A patched Deployment can, for example, mount a ConfigMap at that path.
 
-### Filename and entry rules
-
-A snippet filename must be non-empty and contain only ASCII letters, digits,
-`.`, `_`, and `-`. For example, `10-site-validation.yaml` is valid.
-
-PXE applies these rules when scanning the directory:
-
-- Dotfiles are skipped. This includes ConfigMap mount internals such as
-  `..data`.
-- Subdirectories are skipped.
-- Regular files are served.
-- Symbolic links that resolve to regular files are served, which supports
-  ConfigMap-mounted snippets.
-- Invalid or non-UTF-8 names are skipped with a warning.
-- Directory entries that cannot be read or inspected are skipped with a
-  warning.
-
-If the directory is missing, empty, or contains no servable files, PXE returns
-a deliberate no-op document:
-
-```yaml
-#cloud-config
-{}
-```
-
-This is the supported default for an unconfigured site.
-
-### Unreadable snippet directory
-
-If the snippet directory exists but PXE cannot list it, PXE still returns the
-no-op document. This prevents an operator-side permissions problem from making
-the Scout datasource unavailable.
-
-PXE also emits the `pxe_snippet_directory_unreadable` event and increments:
-
-```text
-carbide_pxe_boot_outcomes_total{endpoint="cloud_init_scout",reason="snippet_directory_unreadable"}
-```
-
-Use this signal to distinguish an unconfigured site from a configured directory
-that PXE cannot read.
-
-### Compose multiple snippets safely
+## Configure Merging for Multiple Snippets
 
 Each cloud-config snippet is a separate cloud-config document. When cloud-init
 merges these documents, it replaces lists rather than appending them by
@@ -131,7 +114,92 @@ A single cloud-config snippet does not need a custom merge policy. Cloud-config
 snippets that use different top-level keys do not conflict. Other supported
 user-data formats, such as scripts, do not use cloud-config merge policies.
 
-## Understand Scout's cloud-init wait
+## Verify the Served Configuration
+
+Boot a host into Scout, then fetch `user-data` from that host. Run the request
+from Scout because PXE resolves the datasource caller from its connection IP.
+Set `PXE_URL` to the PXE base URL used by the host:
+
+```bash
+PXE_URL='<PXE URL>'
+wget -qO- "${PXE_URL%/}/api/v0/cloud-init/scout/user-data"
+```
+
+When snippets are configured, the response begins with `#include` and lists
+one URL for each servable snippet in filename order. Fetch any listed URL with
+`wget -qO-` to inspect the original snippet.
+
+When no snippets are configured, the response is a deliberate no-op document:
+
+```yaml
+#cloud-config
+{}
+```
+
+After cloud-init completes, check its status and output on the Scout host:
+
+```bash
+cloud-init status --long
+journalctl -u cloud-final.service
+```
+
+## Reference
+
+### Paths and Endpoints
+
+PXE exposes Scout's NoCloud datasource URL through the internal iPXE variable
+`${scout-cloudinit-url}`. The Scout boot instruction passes it on the kernel
+command line as `ds=nocloud;s=${scout-cloudinit-url}`.
+
+| Purpose | Path or endpoint |
+| --- | --- |
+| Datasource | `/api/v0/cloud-init/scout/` |
+| User-data | `/api/v0/cloud-init/scout/user-data` |
+| Meta-data | `/api/v0/cloud-init/scout/meta-data` |
+| Snippet directory | `<PXE static directory>/blobs/internal/cloud-init.d/scout` |
+| Served snippets | `/public/blobs/internal/cloud-init.d/scout/` |
+
+The datasource provides `user-data` and `meta-data`. It does not provide
+`vendor-data`.
+
+PXE renders `user-data` as a cloud-init `#include` document containing the
+snippet URLs. Cloud-init fetches and processes each included document in
+filename order.
+
+### File Discovery Rules
+
+PXE applies these rules when scanning the snippet directory:
+
+- Dotfiles are skipped. This includes ConfigMap mount internals such as
+  `..data`.
+- Subdirectories are skipped.
+- Regular files are served.
+- Symbolic links that resolve to regular files are served, which supports
+  ConfigMap-mounted snippets.
+- Invalid or non-UTF-8 names are skipped with a warning.
+- Directory entries that cannot be read or inspected are skipped with a
+  warning.
+
+### Empty or Unreadable Directory Behavior
+
+If the directory is missing, empty, or contains no servable files, PXE returns
+the no-op cloud-config document shown in the verification procedure. This is
+the supported default for an unconfigured site.
+
+If the directory exists but PXE cannot list it, PXE still returns the no-op
+document. This prevents an operator-side permissions problem from making the
+Scout datasource unavailable.
+
+PXE also emits the `pxe_snippet_directory_unreadable` event and increments:
+
+```text
+carbide_pxe_boot_outcomes_total{endpoint="cloud_init_scout",reason="snippet_directory_unreadable"}
+```
+
+Use this signal to distinguish an unconfigured site from a configured directory
+that PXE cannot read.
+
+### Scout Wait and Timeout Behavior
 
 Before registering the machine and proceeding with discovery, Scout runs
 `cloud-init status --wait --long`. In a normal cloud-init run, every snippet has
@@ -152,33 +220,7 @@ the running Scout image instead of assuming a fixed duration:
 systemctl show -p TimeoutStartUSec cloud-final.service
 ```
 
-## Never reboot from a Scout snippet
-
-Never reboot a host from a Scout snippet.
-
-Scout runs from a RAMdisk. Rebooting causes a full re-PXE, discards the current
-root filesystem, and runs the same snippets again. A snippet that reboots can
-therefore create an endless discovery boot loop.
-
-Changes that require a reboot, such as kernel parameters, module changes, or
-firmware activation, belong in the Scout image or in a later lifecycle state
-that owns the reboot.
-
-## Make snippets idempotent
-
-Snippets run on every discovery boot against a clean root filesystem. Any
-effect outside that filesystem must be safe to repeat. Examples include calling
-an API, modifying BMC or firmware state, writing to persistent storage, or
-consuming a license seat.
-
-## Do not put secrets in snippets
-
-Snippet files are served through `/public` without authentication. Anything in
-a snippet is readable by any client that can reach the PXE service. Do not
-embed passwords, tokens, private keys, or other secrets. If privileged material
-is required, retrieve it at runtime from an authenticated source.
-
-## Understand Scout metadata
+### Metadata Precedence
 
 PXE resolves `instance-id` in this order:
 
@@ -191,5 +233,5 @@ PXE sets `local-hostname` only when the resolved machine interface has a
 non-empty hostname. Otherwise, the field is omitted so cloud-init can apply its
 own hostname behavior.
 
-For the complete host discovery workflow, Refer to [Ingesting
+For the complete host discovery workflow, refer to [Ingesting
 Hosts](ingesting-hosts.md).
