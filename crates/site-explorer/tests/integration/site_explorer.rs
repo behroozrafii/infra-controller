@@ -35,7 +35,7 @@ use db::sku::CURRENT_SKU_VERSION;
 use db::{ConditionalWrite, ObjectFilter};
 use itertools::Itertools;
 use mac_address::MacAddress;
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::hardware_info::{DmiData, HardwareInfo};
 use model::machine::machine_id::from_hardware_info_with_type;
@@ -47,8 +47,8 @@ use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::metadata::Metadata;
 use model::site_explorer::{
     BlueFieldOperatingMode, Chassis, ComputerSystem, EndpointExplorationError,
-    EndpointExplorationReport, EndpointType, ExploredDpu, ExploredManagedHost, Inventory,
-    NetworkAdapter, PreingestionState, Service, UefiDevicePath,
+    EndpointExplorationReport, EndpointType, ExploredDpu, ExploredManagedHost,
+    InitialBmcResetPhase, Inventory, NetworkAdapter, PreingestionState, Service, UefiDevicePath,
 };
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::GetSiteExplorationRequest;
@@ -156,6 +156,7 @@ fn suppression_input(
 ) -> NewBmcSuppression {
     NewBmcSuppression {
         bmc_mac_address,
+        source: BmcSuppressionSource::Decommissioning,
         reason: "site explorer suppression test".to_string(),
         subsystem,
     }
@@ -265,6 +266,7 @@ async fn test_periodic_suppression_skips_every_candidate_class(
                 txn.as_mut(),
                 machine.mac,
                 BmcSuppressionSubsystem::SiteExplorer,
+                BmcSuppressionSource::Decommissioning,
             )
             .await?
             .unwrap()
@@ -272,10 +274,14 @@ async fn test_periodic_suppression_skips_every_candidate_class(
             .is_some()
         );
     }
-    let dhcp_only_suppression =
-        db::bmc_suppression::find(txn.as_mut(), machines[3].mac, BmcSuppressionSubsystem::Dhcp)
-            .await?
-            .unwrap();
+    let dhcp_only_suppression = db::bmc_suppression::find(
+        txn.as_mut(),
+        machines[3].mac,
+        BmcSuppressionSubsystem::Dhcp,
+        BmcSuppressionSource::Decommissioning,
+    )
+    .await?
+    .unwrap();
     assert!(dhcp_only_suppression.acknowledged_at.is_none());
     txn.commit().await?;
 
@@ -476,6 +482,7 @@ async fn test_suppressed_unexplored_endpoint_does_not_consume_budget_and_resumes
         txn.as_mut(),
         machines[0].mac,
         BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::Decommissioning,
     )
     .await?;
     txn.commit().await?;
@@ -505,6 +512,95 @@ async fn test_suppressed_unexplored_endpoint_does_not_consume_budget_and_resumes
             .await?
             .len(),
         1
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+/// A BMC preingestion parked with `waiting_for_explorer_refresh` is probed
+/// ahead of an older routine report inside the `explorations_per_run` budget,
+/// while a parked endpoint that preingestion has completed is not.
+#[sqlx_test]
+async fn test_preingestion_refresh_wait_is_served_within_the_budget(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let mut machines = vec![
+        env.new_machine("02:00:00:00:12:01", "Vendor1"),
+        env.new_machine("02:00:00:00:12:02", "Vendor2"),
+        env.new_machine("02:00:00:00:12:03", "Vendor3"),
+    ];
+    machines.discover_dhcp(env.api()).await?;
+
+    let routine_ip: IpAddr = machines[0].ip.parse()?;
+    let completed_ip: IpAddr = machines[1].ip.parse()?;
+    let parked_ip: IpAddr = machines[2].ip.parse()?;
+    let report = cached_suppression_report("refresh wait tiering");
+
+    let mut txn = env.pool.begin().await?;
+    // Inserted first, so the routine endpoint carries the oldest report.
+    db::explored_endpoints::insert(routine_ip, &report, false, txn.as_mut()).await?;
+    db::explored_endpoints::insert(completed_ip, &report, false, txn.as_mut()).await?;
+    db::explored_endpoints::insert(parked_ip, &report, false, txn.as_mut()).await?;
+    db::explored_endpoints::set_preingestion_complete(completed_ip, txn.as_mut()).await?;
+    db::explored_endpoints::set_waiting_for_explorer_refresh(completed_ip, txn.as_mut()).await?;
+    db::explored_endpoints::set_preingestion_initial_bmc_reset(
+        parked_ip,
+        InitialBmcResetPhase::WaitForExplorerRefresh,
+        txn.as_mut(),
+    )
+    .await?;
+    db::explored_endpoints::set_waiting_for_explorer_refresh(parked_ip, txn.as_mut()).await?;
+    let parked_before = db::explored_endpoints::find_all_by_ip(parked_ip, txn.as_mut()).await?;
+    let completed_before =
+        db::explored_endpoints::find_all_by_ip(completed_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    assert!(parked_before[0].waiting_for_explorer_refresh);
+    assert!(!parked_before[0].exploration_requested);
+
+    let explorer = env.test_site_explorer(suppression_test_config(1));
+    explorer.insert_endpoints(
+        [routine_ip, completed_ip, parked_ip]
+            .into_iter()
+            .map(|ip| {
+                (
+                    ip,
+                    EndpointExplorationReport {
+                        endpoint_type: EndpointType::Bmc,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect(),
+    );
+    explorer.run_single_iteration().await?;
+
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .explore_endpoint_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.ip_address)
+            .collect::<Vec<_>>(),
+        vec![parked_ip],
+        "the budget of one goes to the parked BMC, not the oldest routine report"
+    );
+    let mut txn = env.pool.begin().await?;
+    let parked_after = db::explored_endpoints::find_all_by_ip(parked_ip, txn.as_mut()).await?;
+    assert!(!parked_after[0].waiting_for_explorer_refresh);
+    assert_eq!(
+        parked_after[0].report_version.version_nr(),
+        parked_before[0].report_version.version_nr() + 1
+    );
+    let completed_after =
+        db::explored_endpoints::find_all_by_ip(completed_ip, txn.as_mut()).await?;
+    assert!(completed_after[0].waiting_for_explorer_refresh);
+    assert_eq!(
+        completed_after[0].report_version,
+        completed_before[0].report_version
     );
     txn.commit().await?;
 
@@ -547,6 +643,7 @@ async fn test_suppression_is_acknowledged_before_precondition_failure(
             txn.as_mut(),
             suppressed_mac,
             BmcSuppressionSubsystem::SiteExplorer,
+            BmcSuppressionSource::Decommissioning,
         )
         .await?
         .unwrap()
@@ -595,6 +692,7 @@ async fn test_suppression_acknowledgement_waits_for_in_flight_exploration(
         &env.pool,
         machine.mac,
         BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::Decommissioning,
     )
     .await?
     .unwrap();
@@ -610,6 +708,7 @@ async fn test_suppression_acknowledgement_waits_for_in_flight_exploration(
         &env.pool,
         machine.mac,
         BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::Decommissioning,
     )
     .await?
     .unwrap();

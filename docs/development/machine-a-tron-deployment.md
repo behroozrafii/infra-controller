@@ -137,6 +137,15 @@ Some registries use a fixed username with API-key auth — set `REGISTRY_PULL_US
 
 ## Cluster Prerequisites
 
+The chart can create the namespace, its `nico.nvidia.com/managed` label, and
+the image pull Secret itself. The `templates/namespace.yaml` template renders
+the Namespace when `global.namespaceOverride` is set and `createNamespace` is
+true (the default). Setting `imagePullSecret.create` to true renders the
+Secret. Refer to the
+[Helm-Only Deployment](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/charts/nico-machine-a-tron/README.md#helm-only-deployment)
+section of the chart README. The steps below create the same resources
+manually.
+
 ### Namespaces and secrets
 
 ```bash
@@ -335,17 +344,19 @@ default in the values file). DHCP discovery alone is **not** sufficient.
 ## Multi-pod simulation with Controller Mode
 
 The chart can shard the simulated fleet across several machine-a-tron pods.
-The `mat-k8s-controller` dynamically creates ClusterIP Services for each BMC,
-with ClusterIP = BMC IP assigned by NICo DHCP. NICo dials each BMC IP directly
-— no `bmc_proxy`. A validated example lives at
+The `mat-k8s-controller` dynamically creates a Service for each BMC, publishing
+the BMC IP assigned by NICo DHCP as the Service's `externalIPs`. NICo dials each
+BMC IP directly - no `bmc_proxy`. A validated example lives at
 `helm-prereqs/values/machine-a-tron-multipod.yaml`.
 
 Everything single-pod mode needs still applies (namespaces, CA copy, Vault
 seeds, SPIFFE URI). Multi-pod with controller adds the following requirements:
 
-1. **`bmcDhcpRelayAddress` must be within Kubernetes ServiceCIDR.** All pods
-   can share the same relay address — NICo assigns unique IPs from the network.
-   Default ServiceCIDR ranges:
+1. **The BMC network must lie outside the Kubernetes ServiceCIDR and pod
+   CIDR.** BMC IPs are Service `externalIPs`, which the apiserver neither
+   allocates nor validates, so an overlap collides with dynamically allocated
+   clusterIPs. All pods can share the same relay address - NICo assigns unique
+   IPs from the network. Default ServiceCIDR ranges to stay clear of:
    - `10.96.0.0/12` - vanilla Kubernetes (kubeadm)
    - `10.96.0.0/16` - kind
    - `10.43.0.0/16` - k3d/K3s
@@ -359,13 +370,13 @@ seeds, SPIFFE URI). Multi-pod with controller adds the following requirements:
 
    [networks.MAT-BMC-SERVICES]
    type = "underlay"
-   prefix = "10.96.64.0/18"
-   gateway = "10.96.64.1"
+   prefix = "10.200.0.0/18"
+   gateway = "10.200.0.1"
    mtu = 1500
    ```
 
 1. **Leave `site_explorer.bmc_proxy` unset.** The Redfish client dials each
-   BMC's ClusterIP directly.
+   BMC IP directly.
 
 1. **Disjoint MAC pools per pod.** The Helm chart **auto-generates** unique
    MAC address pools per pod based on pod index. The format is
@@ -389,7 +400,7 @@ seeds, SPIFFE URI). Multi-pod with controller adds the following requirements:
             hwType: wiwynn_gb200_nvl
             hostCount: 100
             dpuPerHostCount: 2
-            bmcDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
+            bmcDhcpRelayAddress: "10.200.0.1"  # All pods share same relay
             underlayDhcpRelayAddress: "10.104.0.1"
       mat-1:
         machines:
@@ -397,7 +408,7 @@ seeds, SPIFFE URI). Multi-pod with controller adds the following requirements:
             hwType: wiwynn_gb200_nvl
             hostCount: 100
             dpuPerHostCount: 2
-            bmcDhcpRelayAddress: "10.96.64.1"  # NICo assigns unique IPs
+            bmcDhcpRelayAddress: "10.200.0.1"  # NICo assigns unique IPs
             underlayDhcpRelayAddress: "10.104.0.1"
 
     macAddressPool:
