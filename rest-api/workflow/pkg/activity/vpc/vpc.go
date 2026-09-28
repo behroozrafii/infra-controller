@@ -484,6 +484,12 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 		return nil
 	}
 
+	// Core creates its system-owned admin VPC in crates/api-core/src/db_init.rs.
+	// Keep this organization ID in sync; it must not be recovered as a tenant VPC.
+	if reportedVpc.Org == "carbide_internal" {
+		return nil
+	}
+
 	// Create/undelete under one transaction so concurrent inventory pages cannot insert duplicates.
 	vpc, err := cdb.WithTxResult(ctx, mv.dbSession, func(tx *cdb.Tx) (*cdbm.Vpc, error) {
 		vpcDAO := cdbm.NewVpcDAO(mv.dbSession)

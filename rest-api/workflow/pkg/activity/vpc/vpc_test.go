@@ -4,6 +4,7 @@
 package vpc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"reflect"
@@ -19,7 +20,6 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
-	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -27,6 +27,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
 
@@ -307,7 +309,7 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 	vpc12.NetworkSecurityGroupPropagationDetails = &cdbm.NetworkSecurityGroupPropagationDetails{
 		NetworkSecurityGroupPropagationObjectStatus: &corev1.NetworkSecurityGroupPropagationObjectStatus{},
 	}
-	cwu.TestUpdateVPC(t, dbSession, vpc12)
+	util.TestUpdateVPC(t, dbSession, vpc12)
 
 	vpc13 := testVPCBuildVPC(t, dbSession, "test-vpc-13", ip, tn, st, nil, cutil.GetPtr(uuid.New()), nil, tnu, cdbm.VpcStatusReady)
 
@@ -705,7 +707,7 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 
 			mv.siteClientPool.IDClientMap[tt.args.siteID.String()] = tt.fields.clientPoolClient
 
-			cwu.TestInventoryAgeUpdatedTimestamp(tt.args.ctx, t, dbSession, (*cdbm.Vpc)(nil))
+			util.TestInventoryAgeUpdatedTimestamp(tt.args.ctx, t, dbSession, (*cdbm.Vpc)(nil))
 
 			_, err := mv.UpdateVpcsInDB(tt.args.ctx, tt.args.siteID, tt.args.vpcInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
@@ -975,7 +977,7 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 	}
 
 	t.Run("inventory restores soft-deleted VPC", func(t *testing.T) {
-		nonReadyNVLink := cwu.TestBuildNVLinkLogicalPartition(
+		nonReadyNVLink := util.TestBuildNVLinkLogicalPartition(
 			t,
 			dbSession,
 			"test-restore-non-ready-nvlink",
@@ -1009,8 +1011,8 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 
 		// The undelete is deferred while the delete is newer than the staleness threshold, so
 		// backdate it past that.
-		cwu.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil), controllerVpcID)
-		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil))
+		util.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil), controllerVpcID)
+		util.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil))
 		_, err = manager.UpdateVpcsInDB(ctx, site.ID, inventory)
 		require.NoError(t, err)
 		restoredVpc, err := vpcDAO.GetByID(ctx, nil, controllerVpcID, nil)
@@ -1099,7 +1101,7 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 	})
 }
 
-func TestManageVpc_CreateOrUpdateVpcFromSite_SkipsIncompleteOwnership(t *testing.T) {
+func TestManageVpc_CreateOrUpdateVpcFromSite(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testVPCInitDB(t)
 	defer dbSession.Close()
@@ -1118,7 +1120,7 @@ func TestManageVpc_CreateOrUpdateVpcFromSite_SkipsIncompleteOwnership(t *testing
 	otherTenantOrg := "test-other-tenant"
 	otherTenantUser := testVPCBuildUser(t, dbSession, uuid.NewString(), otherTenantOrg, []string{"FORGE_TENANT_ADMIN"})
 	otherTenant := testVPCBuildTenant(t, dbSession, "test-other-tenant", otherTenantOrg, otherTenantUser)
-	otherTenantNVLink := cwu.TestBuildNVLinkLogicalPartition(
+	otherTenantNVLink := util.TestBuildNVLinkLogicalPartition(
 		t,
 		dbSession,
 		"test-other-tenant-nvlink",
@@ -1128,7 +1130,7 @@ func TestManageVpc_CreateOrUpdateVpcFromSite_SkipsIncompleteOwnership(t *testing
 		cdbm.NVLinkLogicalPartitionStatusReady,
 		false,
 	)
-	nonReadyNVLink := cwu.TestBuildNVLinkLogicalPartition(
+	nonReadyNVLink := util.TestBuildNVLinkLogicalPartition(
 		t,
 		dbSession,
 		"test-non-ready-nvlink",
@@ -1159,7 +1161,16 @@ func TestManageVpc_CreateOrUpdateVpcFromSite_SkipsIncompleteOwnership(t *testing
 		wantName      string
 		wantNamePref  string
 		wantNVLinkID  *uuid.UUID
+		wantWarning   string
 	}{
+		{
+			name: "Core admin VPC is skipped silently",
+			controllerVpc: &corev1.Vpc{
+				Id:       &corev1.VpcId{Value: uuid.NewString()},
+				Config:   &corev1.VpcConfig{TenantOrganizationId: "carbide_internal"},
+				Metadata: &corev1.Metadata{Name: "admin"},
+			},
+		},
 		{
 			name: "unknown tenant organization",
 			controllerVpc: &corev1.Vpc{
@@ -1167,6 +1178,7 @@ func TestManageVpc_CreateOrUpdateVpcFromSite_SkipsIncompleteOwnership(t *testing
 				Config:   &corev1.VpcConfig{TenantOrganizationId: "unknown-tenant-org"},
 				Metadata: &corev1.Metadata{Name: "unknown-tenant-vpc"},
 			},
+			wantWarning: "unable to create VPC found on Site: no Tenants were found for org: unknown-tenant-org",
 		},
 		{
 			name: "invalid controller VPC ID",
@@ -1175,6 +1187,7 @@ func TestManageVpc_CreateOrUpdateVpcFromSite_SkipsIncompleteOwnership(t *testing
 				Config:   &corev1.VpcConfig{TenantOrganizationId: authorizedTenantOrg},
 				Metadata: &corev1.Metadata{Name: "invalid-id-vpc"},
 			},
+			wantWarning: "unable to create VPC found on Site: failed to parse VPC Controller ID, not a valid UUID not-a-uuid",
 		},
 		{
 			name: "NVLink Logical Partition from another tenant is rejected",
@@ -1188,6 +1201,7 @@ func TestManageVpc_CreateOrUpdateVpcFromSite_SkipsIncompleteOwnership(t *testing
 				},
 				Metadata: &corev1.Metadata{Name: "cross-tenant-nvlink-vpc"},
 			},
+			wantWarning: "unable to create VPC found on Site: NVLink Logical Partition differs in REST cache and Site record for Tenant",
 		},
 		{
 			name: "creates VPC with non-Ready inventory NVLink Logical Partition",
@@ -1232,6 +1246,7 @@ func TestManageVpc_CreateOrUpdateVpcFromSite_SkipsIncompleteOwnership(t *testing
 				Config:   &corev1.VpcConfig{TenantOrganizationId: ""},
 				Metadata: &corev1.Metadata{Name: "missing-tenant-org-vpc"},
 			},
+			wantWarning: "unable to create VPC found on Site: VPC on Site is reporting empty Tenant organization ID",
 		},
 		{
 			name: "creates VPC without Site allocation",
@@ -1247,12 +1262,40 @@ func TestManageVpc_CreateOrUpdateVpcFromSite_SkipsIncompleteOwnership(t *testing
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			var logOutput bytes.Buffer
+			originalLogger := log.Logger
+			log.Logger = zerolog.New(&logOutput).Level(zerolog.WarnLevel)
+			t.Cleanup(func() {
+				log.Logger = originalLogger
+			})
+
 			vpc := manager.createOrUpdateVpcFromSite(
 				ctx,
 				site,
 				tt.controllerVpc,
 				nil,
 			)
+			if tt.wantWarning == "" {
+				assert.Empty(t, logOutput.String(), "unexpected warning or error")
+			} else {
+				assert.Contains(t, logOutput.String(), `"level":"warn"`)
+				assert.Contains(t, logOutput.String(), tt.wantWarning)
+			}
+
+			vpcID, err := uuid.Parse(tt.controllerVpc.GetId().GetValue())
+			if err == nil {
+				persistedVpcs, _, err := cdbm.NewVpcDAO(dbSession).GetAll(ctx, nil, cdbm.VpcFilterInput{
+					VpcIDs: []uuid.UUID{vpcID}, IncludeDeleted: true,
+				}, cdbp.PageInput{}, nil)
+				require.NoError(t, err)
+				if tt.wantVpc {
+					require.Len(t, persistedVpcs, 1)
+					assert.Equal(t, authorizedTenant.ID, persistedVpcs[0].TenantID)
+				} else {
+					assert.Empty(t, persistedVpcs)
+				}
+			}
+
 			if tt.wantVpc {
 				require.NotNil(t, vpc)
 				assert.Equal(t, cdbm.VpcStatusReady, vpc.Status)
