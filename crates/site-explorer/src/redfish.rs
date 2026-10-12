@@ -1768,9 +1768,10 @@ async fn fetch_secure_boot_status(
         Ok(status) => status,
         Err(RedfishError::NotSupported(_)) => return Ok(None),
         // The standard client probes the optional resource directly, without a link check.
-        Err(RedfishError::HTTPErrorCode { status_code, .. })
-            if status_code == http::StatusCode::NOT_FOUND =>
-        {
+        Err(RedfishError::HTTPErrorCode {
+            status_code, url, ..
+        }) if status_code == http::StatusCode::NOT_FOUND => {
+            tracing::debug!(%url, "SecureBoot resource returned 404; treating as absent");
             return Ok(None);
         }
         Err(error) => return Err(error),
@@ -2118,6 +2119,7 @@ mod tests {
     async fn secure_boot_absence_preserves_other_errors() {
         use std::sync::Mutex;
 
+        use carbide_instrument::testing::capture_logs_async;
         use libredfish::model::secure_boot::SecureBoot;
         use libredfish::{EnabledDisabled, Redfish, RedfishError, RedfishFuture};
 
@@ -2215,6 +2217,24 @@ mod tests {
             },
         )
         .await;
+
+        let client = SecureBootClient(Mutex::new(Some(http_error(http::StatusCode::NOT_FOUND))));
+        let (result, logs) = capture_logs_async(super::fetch_secure_boot_status(&client)).await;
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            logs.len(),
+            1,
+            "404 should emit only a debug diagnostic: {logs:?}"
+        );
+        assert_eq!(logs[0].level, tracing::Level::DEBUG);
+        assert_eq!(
+            logs[0].message,
+            "SecureBoot resource returned 404; treating as absent"
+        );
+        assert_eq!(
+            logs[0].field("url"),
+            Some("https://bmc.example/redfish/v1/Systems/1/SecureBoot"),
+        );
     }
 
     #[test]
