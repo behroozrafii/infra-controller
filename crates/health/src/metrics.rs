@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use http::Response;
-use http::header::CONTENT_TYPE;
+use http::header::{ALLOW, CONTENT_TYPE};
+use http::{Method, Response};
 use hyper::Request;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -687,14 +687,37 @@ fn serve_request<B>(
     req: Request<B>,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<Response<String>, hyper::Error> {
-    match req.uri().path() {
-        "/livez" => Ok(Response::builder()
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, "/livez") => Ok(Response::builder()
             .status(http::StatusCode::OK)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
             .body("ok".to_string())
             .expect("BUG: Response::builder error")),
-        "/metrics" => serve_prometheus(metrics_manager.export_metrics(), "service metrics"),
-        "/telemetry" => serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics"),
+        (&Method::GET, "/metrics") => {
+            serve_prometheus(metrics_manager.export_metrics(), "service metrics")
+        }
+        (&Method::GET, "/telemetry") => {
+            serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics")
+        }
+        (&Method::HEAD, path @ ("/livez" | "/metrics" | "/telemetry")) => {
+            let encoder = TextEncoder::new();
+            let content_type = if path == "/livez" {
+                "text/plain; charset=utf-8"
+            } else {
+                encoder.format_type()
+            };
+            Ok(Response::builder()
+                .status(http::StatusCode::OK)
+                .header(CONTENT_TYPE, content_type)
+                .body(String::new())
+                .expect("BUG: Response::builder error"))
+        }
+        (_, "/livez" | "/metrics" | "/telemetry") => Ok(Response::builder()
+            .status(http::StatusCode::METHOD_NOT_ALLOWED)
+            .header(ALLOW, "GET, HEAD")
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body("method not allowed".to_string())
+            .expect("BUG: Response::builder error")),
         _ => Ok(Response::builder()
             .status(http::StatusCode::NOT_FOUND)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -756,28 +779,180 @@ mod tests {
 
     #[test]
     fn unknown_metrics_route_returns_not_found() {
-        let request = Request::builder()
-            .uri("/definitely-not-a-route")
-            .body(())
-            .expect("test request should be valid");
         let metrics_manager = Arc::new(
             MetricsManager::new("test").expect("metrics manager should initialize for test"),
         );
 
-        let response =
-            serve_request(request, metrics_manager).expect("request should produce a response");
+        check_values(
+            [
+                Check {
+                    scenario: "GET on an unknown route",
+                    input: Method::GET,
+                    expect: http::StatusCode::NOT_FOUND,
+                },
+                Check {
+                    scenario: "unsupported method on an unknown route stays 404",
+                    input: Method::POST,
+                    expect: http::StatusCode::NOT_FOUND,
+                },
+            ],
+            |method| {
+                let request = Request::builder()
+                    .method(method.clone())
+                    .uri("/definitely-not-a-route")
+                    .body(())
+                    .expect("test request should be valid");
+                let response = serve_request(request, metrics_manager.clone())
+                    .expect("request should produce a response");
 
-        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
-        assert_eq!(
-            response
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/plain; charset=utf-8"),
+                assert_eq!(
+                    response.headers()[CONTENT_TYPE],
+                    "text/plain; charset=utf-8",
+                    "{method}",
+                );
+                assert!(!response.headers().contains_key(ALLOW));
+                assert_eq!(
+                    response.body(),
+                    "not found; use /metrics, /telemetry, or /livez",
+                    "{method}",
+                );
+                response.status()
+            },
         );
-        assert_eq!(
-            response.body(),
-            "not found; use /metrics, /telemetry, or /livez",
+    }
+
+    #[test]
+    fn metrics_routes_support_get_and_head() {
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test").expect("metrics manager should initialize for test"),
+        );
+        for (registry, name) in [
+            (&metrics_manager.global_registry, "test_service_metric"),
+            (&metrics_manager.telemetry_registry, "test_telemetry_metric"),
+        ] {
+            let gauge = prometheus::IntGauge::new(name, "Test metric.")
+                .expect("test metric should have a valid name");
+            gauge.set(1);
+            registry
+                .register(Box::new(gauge))
+                .expect("test metric should register once");
+        }
+        let encoder = TextEncoder::new();
+        let prometheus_content_type = encoder.format_type();
+        let service_body = "# HELP test_service_metric Test metric.\n# TYPE test_service_metric gauge\ntest_service_metric 1\n";
+        let telemetry_body = "# HELP test_telemetry_metric Test metric.\n# TYPE test_telemetry_metric gauge\ntest_telemetry_metric 1\n";
+
+        check_values(
+            [
+                Check {
+                    scenario: "GET liveness returns plain text",
+                    input: (Method::GET, "/livez"),
+                    expect: ("text/plain; charset=utf-8".to_string(), "ok".to_string()),
+                },
+                Check {
+                    scenario: "GET service metrics returns Prometheus exposition",
+                    input: (Method::GET, "/metrics"),
+                    expect: (
+                        prometheus_content_type.to_string(),
+                        service_body.to_string(),
+                    ),
+                },
+                Check {
+                    scenario: "GET telemetry returns Prometheus exposition",
+                    input: (Method::GET, "/telemetry"),
+                    expect: (
+                        prometheus_content_type.to_string(),
+                        telemetry_body.to_string(),
+                    ),
+                },
+                Check {
+                    scenario: "HEAD liveness returns plain-text headers and no body",
+                    input: (Method::HEAD, "/livez"),
+                    expect: ("text/plain; charset=utf-8".to_string(), String::new()),
+                },
+                Check {
+                    scenario: "HEAD service metrics returns Prometheus headers and no body",
+                    input: (Method::HEAD, "/metrics"),
+                    expect: (prometheus_content_type.to_string(), String::new()),
+                },
+                Check {
+                    scenario: "HEAD telemetry returns Prometheus headers and no body",
+                    input: (Method::HEAD, "/telemetry"),
+                    expect: (prometheus_content_type.to_string(), String::new()),
+                },
+            ],
+            |(method, path)| {
+                let request = Request::builder()
+                    .method(method.clone())
+                    .uri(path)
+                    .body(())
+                    .expect("test request should be valid");
+                let response = serve_request(request, metrics_manager.clone())
+                    .expect("request should produce a response");
+
+                assert_eq!(response.status(), http::StatusCode::OK, "{method} {path}");
+                assert!(!response.headers().contains_key(ALLOW));
+                let content_type = response.headers()[CONTENT_TYPE]
+                    .to_str()
+                    .expect("content type should be valid text")
+                    .to_string();
+                (content_type, response.into_body())
+            },
+        );
+    }
+
+    #[test]
+    fn metrics_routes_reject_unsupported_methods() {
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test").expect("metrics manager should initialize for test"),
+        );
+
+        check_values(
+            [
+                Check {
+                    scenario: "POST liveness is rejected",
+                    input: (Method::POST, "/livez"),
+                    expect: http::StatusCode::METHOD_NOT_ALLOWED,
+                },
+                Check {
+                    scenario: "PUT service metrics is rejected",
+                    input: (Method::PUT, "/metrics"),
+                    expect: http::StatusCode::METHOD_NOT_ALLOWED,
+                },
+                Check {
+                    scenario: "DELETE telemetry is rejected",
+                    input: (Method::DELETE, "/telemetry"),
+                    expect: http::StatusCode::METHOD_NOT_ALLOWED,
+                },
+                Check {
+                    scenario: "PATCH service metrics is rejected",
+                    input: (Method::PATCH, "/metrics"),
+                    expect: http::StatusCode::METHOD_NOT_ALLOWED,
+                },
+                Check {
+                    scenario: "OPTIONS liveness is rejected",
+                    input: (Method::OPTIONS, "/livez"),
+                    expect: http::StatusCode::METHOD_NOT_ALLOWED,
+                },
+            ],
+            |(method, path)| {
+                let request = Request::builder()
+                    .method(method.clone())
+                    .uri(path)
+                    .body(())
+                    .expect("test request should be valid");
+                let response = serve_request(request, metrics_manager.clone())
+                    .expect("request should produce a response");
+
+                assert_eq!(response.headers()[ALLOW], "GET, HEAD");
+                assert_eq!(
+                    response.headers()[CONTENT_TYPE],
+                    "text/plain; charset=utf-8",
+                    "{method} {path}",
+                );
+                assert_eq!(response.body(), "method not allowed", "{method} {path}");
+                response.status()
+            },
         );
     }
 
