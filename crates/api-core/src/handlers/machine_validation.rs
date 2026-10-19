@@ -586,6 +586,15 @@ pub(crate) async fn find_machine_validation_run_item_ids(
     }))
 }
 
+fn parse_request_uuid(id: &::rpc::common::Uuid, field: &str) -> Result<uuid::Uuid, CarbideError> {
+    uuid::Uuid::try_from(id).map_err(|_| {
+        CarbideError::InvalidArgument(format!(
+            "machine validation {field} is not a valid UUID: {}",
+            id.value
+        ))
+    })
+}
+
 pub(crate) async fn find_machine_validation_run_items_by_ids(
     api: &Api,
     request: tonic::Request<rpc::MachineValidationRunItemsByIdsRequest>,
@@ -610,11 +619,7 @@ pub(crate) async fn find_machine_validation_run_items_by_ids(
     let run_item_ids = req
         .run_item_ids
         .iter()
-        .map(|id| {
-            uuid::Uuid::try_from(id)
-                .map(MachineValidationRunItemId::from)
-                .map_err(CarbideError::from)
-        })
+        .map(|id| parse_request_uuid(id, "run item id").map(MachineValidationRunItemId::from))
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut db_reader = api.db_reader();
@@ -643,9 +648,8 @@ pub(crate) async fn get_machine_validation_attempt(
         .attempt_id
         .as_ref()
         .ok_or(CarbideError::MissingArgument("attempt id"))?;
-    let attempt_id = MachineValidationAttemptId::from(
-        uuid::Uuid::try_from(attempt_id).map_err(CarbideError::from)?,
-    );
+    let attempt_id =
+        MachineValidationAttemptId::from(parse_request_uuid(attempt_id, "attempt id")?);
 
     let attempt =
         db::machine_validation_execution::find_attempt_by_id(&api.database_connection, &attempt_id)
@@ -666,9 +670,8 @@ pub(crate) async fn find_machine_validation_attempts(
         .run_item_id
         .as_ref()
         .ok_or(CarbideError::MissingArgument("run item id"))?;
-    let run_item_id = MachineValidationRunItemId::from(
-        uuid::Uuid::try_from(run_item_id).map_err(CarbideError::from)?,
-    );
+    let run_item_id =
+        MachineValidationRunItemId::from(parse_request_uuid(run_item_id, "run item id")?);
     let attempts = db::machine_validation_execution::find_attempts_by_run_item_id(
         &api.database_connection,
         &run_item_id,
@@ -697,9 +700,8 @@ pub(crate) async fn append_machine_validation_attempt_log(
         .attempt_id
         .as_ref()
         .ok_or(CarbideError::MissingArgument("attempt id"))?;
-    let attempt_id = MachineValidationAttemptId::from(
-        uuid::Uuid::try_from(attempt_id).map_err(CarbideError::from)?,
-    );
+    let attempt_id =
+        MachineValidationAttemptId::from(parse_request_uuid(attempt_id, "attempt id")?);
     let sequence = i32::try_from(req.sequence).map_err(|_| {
         CarbideError::InvalidArgument(
             "machine validation attempt log sequence is too large".to_string(),
@@ -840,9 +842,8 @@ pub(crate) async fn get_machine_validation_attempt_logs(
         .attempt_id
         .as_ref()
         .ok_or(CarbideError::MissingArgument("attempt id"))?;
-    let attempt_id = MachineValidationAttemptId::from(
-        uuid::Uuid::try_from(attempt_id).map_err(CarbideError::from)?,
-    );
+    let attempt_id =
+        MachineValidationAttemptId::from(parse_request_uuid(attempt_id, "attempt id")?);
     let after_sequence = i32::try_from(req.after_sequence).map_err(|_| {
         CarbideError::InvalidArgument(
             "machine validation attempt log after_sequence is too large".to_string(),
@@ -895,18 +896,16 @@ pub(crate) async fn heartbeat_machine_validation_run(
     let mut attempt_id = None;
     match req.target {
         Some(rpc::machine_validation_heartbeat_request::Target::RunItemId(id)) => {
-            run_item_id = Some(
-                uuid::Uuid::try_from(&id)
-                    .map(MachineValidationRunItemId::from)
-                    .map_err(CarbideError::from)?,
-            );
+            run_item_id = Some(MachineValidationRunItemId::from(parse_request_uuid(
+                &id,
+                "run item id",
+            )?));
         }
         Some(rpc::machine_validation_heartbeat_request::Target::AttemptId(id)) => {
-            attempt_id = Some(
-                uuid::Uuid::try_from(&id)
-                    .map(MachineValidationAttemptId::from)
-                    .map_err(CarbideError::from)?,
-            );
+            attempt_id = Some(MachineValidationAttemptId::from(parse_request_uuid(
+                &id,
+                "attempt id",
+            )?));
         }
         Some(rpc::machine_validation_heartbeat_request::Target::TestId(value)) => {
             test_id = Some(value);
