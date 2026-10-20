@@ -1041,6 +1041,15 @@ pub(crate) async fn invoke_power(
     let mut txn = api.txn_begin().await?;
 
     let request = request.into_inner();
+    let operation = rpc::instance_power_request::Operation::try_from(request.operation)
+        .map_err(|_| CarbideError::InvalidArgument("unknown instance power operation".into()))?;
+    let graceful = operation == rpc::instance_power_request::Operation::PowerGracefulRestart;
+    if graceful && (request.boot_with_custom_ipxe || request.apply_updates_on_reboot) {
+        return Err(CarbideError::InvalidArgument(
+            "graceful restart cannot request custom iPXE or apply updates".into(),
+        )
+        .into());
+    }
     let instance_id = request
         .instance_id
         .ok_or(CarbideError::MissingArgument("instance_id"))?;
@@ -1084,6 +1093,43 @@ pub(crate) async fn invoke_power(
                 .run_provisioning_instructions_on_every_boot
         })
         .unwrap_or_default();
+
+    if graceful {
+        if run_provisioning_instructions_on_every_boot
+            || !matches!(
+                snapshot.managed_state,
+                ManagedHostState::Assigned {
+                    instance_state: InstanceState::Ready,
+                }
+            )
+        {
+            return Err(CarbideError::FailedPrecondition(
+                "graceful restart requires an Assigned/Ready instance without always-on custom iPXE".into(),
+            ).into());
+        }
+
+        let endpoints = db::explored_endpoints::find_by_ips(&mut txn, vec![*bmc_ip]).await?;
+        match endpoints
+            .first()
+            .and_then(|endpoint| endpoint.report.requires_ipmi_restart())
+        {
+            Some(false) => {}
+            Some(true) => {
+                // The shared report guard documents the DPU-power hazard.
+                // Its IPMI workaround cannot satisfy a graceful restart request.
+                return Err(CarbideError::FailedPrecondition(
+                    "graceful host restart is unsupported on this platform".into(),
+                )
+                .into());
+            }
+            None => {
+                return Err(CarbideError::FailedPrecondition(
+                    "graceful host restart requires sufficient platform discovery data".into(),
+                )
+                .into());
+            }
+        }
+    }
 
     // Determine if we should let the state machine handle the reboot.
     // This is true when:
@@ -1233,10 +1279,18 @@ pub(crate) async fn invoke_power(
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
+    let action = match operation {
+        rpc::instance_power_request::Operation::PowerReset => {
+            libredfish::SystemPowerControl::ForceRestart
+        }
+        rpc::instance_power_request::Operation::PowerGracefulRestart => {
+            libredfish::SystemPowerControl::GracefulRestart
+        }
+    };
     client
-        .power(libredfish::SystemPowerControl::ForceRestart)
+        .power(action)
         .await
-        .map_err(|e| CarbideError::internal(format!("failed redfish ForceRestart subtask: {e}")))?;
+        .map_err(|e| CarbideError::internal(format!("failed redfish {action} subtask: {e}")))?;
 
     Ok(Response::new(rpc::InstancePowerResult {}))
 }
