@@ -54,6 +54,10 @@ use crate::error::DpfError;
 use crate::types::DpfDeletePreconditions;
 
 /// Kubernetes-backed implementation of DPF repository.
+///
+/// DPF CR creates, applies, and merge patches propagate the active trace in resource annotations.
+/// JSON patches require the caller's observed metadata to preserve existing annotations and are
+/// passed through unchanged, as are status writes and core Kubernetes resources.
 #[derive(Clone)]
 pub struct KubeRepository {
     client: Client,
@@ -61,6 +65,64 @@ pub struct KubeRepository {
 }
 
 impl KubeRepository {
+    const TRACEPARENT: &str = "tracing.k8s.io/traceparent";
+    const TRACESTATE: &str = "tracing.k8s.io/tracestate";
+
+    fn current_trace_context() -> Option<(String, Option<String>)> {
+        let mut headers = http::HeaderMap::new();
+        trace_propagation::inject_current_context(&mut headers);
+        let traceparent = headers.get("traceparent")?.to_str().ok()?;
+        let tracestate = headers
+            .get("tracestate")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        Some((traceparent.to_owned(), tracestate))
+    }
+
+    fn with_trace_annotations<K: Resource + Clone>(resource: &K) -> K {
+        let mut resource = resource.clone();
+        if let Some((traceparent, tracestate)) = Self::current_trace_context() {
+            let annotations = resource.meta_mut().annotations.get_or_insert_default();
+            annotations.insert(Self::TRACEPARENT.to_owned(), traceparent);
+            if let Some(tracestate) = tracestate {
+                annotations.insert(Self::TRACESTATE.to_owned(), tracestate);
+            } else {
+                annotations.remove(Self::TRACESTATE);
+            }
+        }
+        resource
+    }
+
+    fn with_trace_annotations_patch(mut patch: serde_json::Value) -> serde_json::Value {
+        let Some((traceparent, tracestate)) = Self::current_trace_context() else {
+            return patch;
+        };
+        // Preserve explicit metadata/annotation deletion and leave malformed values for Kubernetes
+        // to reject, rather than changing the caller's patch semantics or panicking on JSON indexing.
+        let Some(object) = patch.as_object_mut() else {
+            return patch;
+        };
+        let Some(metadata) = object
+            .entry("metadata")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+        else {
+            return patch;
+        };
+        let Some(annotations) = metadata
+            .entry("annotations")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+        else {
+            return patch;
+        };
+        annotations.insert(Self::TRACEPARENT.to_owned(), traceparent.into());
+        // A merge patch must explicitly remove old vendor state when the new trace has none.
+        annotations.insert(Self::TRACESTATE.to_owned(), tracestate.into());
+        patch
+    }
+
     /// Create a new KubeRepository with the default in-cluster or kubeconfig client.
     pub async fn new() -> Result<Self, DpfError> {
         let client = Client::try_default().await?;
@@ -118,9 +180,10 @@ impl BfbRepository for KubeRepository {
     }
 
     async fn create(&self, bfb: &BFB) -> Result<BFB, DpfError> {
+        let bfb = Self::with_trace_annotations(bfb);
         let namespace = bfb.meta().namespace.as_deref().unwrap_or("default");
         let api = self.api(namespace);
-        Ok(api.create(&PostParams::default(), bfb).await?)
+        Ok(api.create(&PostParams::default(), &bfb).await?)
     }
 
     async fn delete(&self, name: &str, namespace: &str) -> Result<(), DpfError> {
@@ -148,9 +211,10 @@ impl BlueFieldSoftwareRepository for KubeRepository {
     }
 
     async fn create(&self, bfs: &BlueFieldSoftware) -> Result<BlueFieldSoftware, DpfError> {
+        let bfs = Self::with_trace_annotations(bfs);
         let namespace = bfs.meta().namespace.as_deref().unwrap_or("default");
         let api = self.api(namespace);
-        Ok(api.create(&PostParams::default(), bfs).await?)
+        Ok(api.create(&PostParams::default(), &bfs).await?)
     }
 
     async fn delete(&self, name: &str, namespace: &str) -> Result<(), DpfError> {
@@ -267,9 +331,10 @@ impl DpuDeviceRepository for KubeRepository {
     }
 
     async fn create(&self, device: &DPUDevice) -> Result<DPUDevice, DpfError> {
+        let device = Self::with_trace_annotations(device);
         let namespace = device.meta().namespace.as_deref().unwrap_or("default");
         let api = self.api(namespace);
-        Ok(api.create(&PostParams::default(), device).await?)
+        Ok(api.create(&PostParams::default(), &device).await?)
     }
 
     async fn patch(
@@ -279,6 +344,7 @@ impl DpuDeviceRepository for KubeRepository {
         patch: serde_json::Value,
     ) -> Result<(), DpfError> {
         let api: Api<DPUDevice> = self.api(namespace);
+        let patch = Self::with_trace_annotations_patch(patch);
         api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
             .await?;
         Ok(())
@@ -305,9 +371,10 @@ impl DpuNodeRepository for KubeRepository {
     }
 
     async fn create(&self, node: &DPUNode) -> Result<DPUNode, DpfError> {
+        let node = Self::with_trace_annotations(node);
         let namespace = node.meta().namespace.as_deref().unwrap_or("default");
         let api = self.api(namespace);
-        Ok(api.create(&PostParams::default(), node).await?)
+        Ok(api.create(&PostParams::default(), &node).await?)
     }
 
     async fn patch(
@@ -317,6 +384,7 @@ impl DpuNodeRepository for KubeRepository {
         patch: serde_json::Value,
     ) -> Result<(), DpfError> {
         let api: Api<DPUNode> = self.api(namespace);
+        let patch = Self::with_trace_annotations_patch(patch);
         api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
             .await?;
         Ok(())
@@ -347,6 +415,7 @@ impl DpuNodeMaintenanceRepository for KubeRepository {
         patch: serde_json::Value,
     ) -> Result<(), DpfError> {
         let api: Api<DPUNodeMaintenance> = self.api(namespace);
+        let patch = Self::with_trace_annotations_patch(patch);
         api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
             .await?;
         Ok(())
@@ -361,9 +430,10 @@ impl DpuFlavorRepository for KubeRepository {
     }
 
     async fn create(&self, flavor: &DPUFlavor) -> Result<DPUFlavor, DpfError> {
+        let flavor = Self::with_trace_annotations(flavor);
         let namespace = flavor.meta().namespace.as_deref().unwrap_or("default");
         let api = self.api(namespace);
-        Ok(api.create(&PostParams::default(), flavor).await?)
+        Ok(api.create(&PostParams::default(), &flavor).await?)
     }
 }
 
@@ -379,9 +449,10 @@ impl DpuFlavorTemplateRepository for KubeRepository {
     }
 
     async fn create(&self, template: &DPUFlavorTemplate) -> Result<DPUFlavorTemplate, DpfError> {
+        let template = Self::with_trace_annotations(template);
         let namespace = template.meta().namespace.as_deref().unwrap_or("default");
         let api = self.api(namespace);
-        Ok(api.create(&PostParams::default(), template).await?)
+        Ok(api.create(&PostParams::default(), &template).await?)
     }
 }
 
@@ -393,6 +464,7 @@ impl DpuSetRepository for KubeRepository {
     }
 
     async fn apply(&self, set: &DPUSet) -> Result<DPUSet, DpfError> {
+        let set = Self::with_trace_annotations(set);
         let namespace = set.meta().namespace.as_deref().unwrap_or("default");
         let name = set.meta().name.as_deref().unwrap_or("default");
         let api = self.api(namespace);
@@ -400,7 +472,7 @@ impl DpuSetRepository for KubeRepository {
             .patch(
                 name,
                 &PatchParams::apply("carbide-dpf-sdk").force(),
-                &Patch::Apply(set),
+                &Patch::Apply(&set),
             )
             .await?)
     }
@@ -434,6 +506,7 @@ impl DpuDeploymentRepository for KubeRepository {
     }
 
     async fn apply(&self, deployment: &DPUDeployment) -> Result<DPUDeployment, DpfError> {
+        let deployment = Self::with_trace_annotations(deployment);
         let namespace = deployment.meta().namespace.as_deref().unwrap_or("default");
         let name = deployment.meta().name.as_deref().unwrap_or("default");
         let api = self.api(namespace);
@@ -441,7 +514,7 @@ impl DpuDeploymentRepository for KubeRepository {
             .patch(
                 name,
                 &PatchParams::apply("carbide-dpf-sdk").force(),
-                &Patch::Apply(deployment),
+                &Patch::Apply(&deployment),
             )
             .await?)
     }
@@ -453,6 +526,7 @@ impl DpuDeploymentRepository for KubeRepository {
         patch: serde_json::Value,
     ) -> Result<(), DpfError> {
         let api: Api<DPUDeployment> = self.api(namespace);
+        let patch = Self::with_trace_annotations_patch(patch);
         api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
             .await?;
         Ok(())
@@ -483,6 +557,7 @@ impl DpuServiceTemplateRepository for KubeRepository {
     }
 
     async fn apply(&self, template: &DPUServiceTemplate) -> Result<DPUServiceTemplate, DpfError> {
+        let template = Self::with_trace_annotations(template);
         let namespace = template.meta().namespace.as_deref().unwrap_or("default");
         let name = template.meta().name.as_deref().unwrap_or("default");
         let api = self.api(namespace);
@@ -490,7 +565,7 @@ impl DpuServiceTemplateRepository for KubeRepository {
             .patch(
                 name,
                 &PatchParams::apply("carbide-dpf-sdk").force(),
-                &Patch::Apply(template),
+                &Patch::Apply(&template),
             )
             .await?)
     }
@@ -517,6 +592,7 @@ impl DpuServiceConfigurationRepository for KubeRepository {
         &self,
         config: &DPUServiceConfiguration,
     ) -> Result<DPUServiceConfiguration, DpfError> {
+        let config = Self::with_trace_annotations(config);
         let namespace = config.meta().namespace.as_deref().unwrap_or("default");
         let name = config.meta().name.as_deref().unwrap_or("default");
         let api = self.api(namespace);
@@ -524,7 +600,7 @@ impl DpuServiceConfigurationRepository for KubeRepository {
             .patch(
                 name,
                 &PatchParams::apply("carbide-dpf-sdk").force(),
-                &Patch::Apply(config),
+                &Patch::Apply(&config),
             )
             .await?)
     }
@@ -544,6 +620,7 @@ impl DpuServiceNADRepository for KubeRepository {
     }
 
     async fn apply(&self, nad: &DPUServiceNAD) -> Result<DPUServiceNAD, DpfError> {
+        let nad = Self::with_trace_annotations(nad);
         let namespace = nad.meta().namespace.as_deref().unwrap_or("default");
         let name = nad.meta().name.as_deref().unwrap_or("default");
         let api = self.api(namespace);
@@ -551,7 +628,7 @@ impl DpuServiceNADRepository for KubeRepository {
             .patch(
                 name,
                 &PatchParams::apply("carbide-dpf-sdk").force(),
-                &Patch::Apply(nad),
+                &Patch::Apply(&nad),
             )
             .await?)
     }
@@ -571,9 +648,10 @@ impl DpuServiceRepository for KubeRepository {
     }
 
     async fn create(&self, service: &DPUService) -> Result<DPUService, DpfError> {
+        let service = Self::with_trace_annotations(service);
         let namespace = service.meta().namespace.as_deref().unwrap_or("default");
         let api = self.api(namespace);
-        Ok(api.create(&PostParams::default(), service).await?)
+        Ok(api.create(&PostParams::default(), &service).await?)
     }
 
     async fn patch(
@@ -639,9 +717,10 @@ impl DpuServiceChainRepository for KubeRepository {
     }
 
     async fn create(&self, chain: &DPUServiceChain) -> Result<DPUServiceChain, DpfError> {
+        let chain = Self::with_trace_annotations(chain);
         let namespace = chain.meta().namespace.as_deref().unwrap_or("default");
         let api = self.api(namespace);
-        Ok(api.create(&PostParams::default(), chain).await?)
+        Ok(api.create(&PostParams::default(), &chain).await?)
     }
 
     async fn patch(
@@ -705,6 +784,7 @@ impl DpuServiceInterfaceRepository for KubeRepository {
     }
 
     async fn apply(&self, iface: &DPUServiceInterface) -> Result<DPUServiceInterface, DpfError> {
+        let iface = Self::with_trace_annotations(iface);
         let namespace = iface.meta().namespace.as_deref().unwrap_or("default");
         let name = iface.meta().name.as_deref().unwrap_or("default");
         let api = self.api(namespace);
@@ -712,15 +792,16 @@ impl DpuServiceInterfaceRepository for KubeRepository {
             .patch(
                 name,
                 &PatchParams::apply("carbide-dpf-sdk").force(),
-                &Patch::Apply(iface),
+                &Patch::Apply(&iface),
             )
             .await?)
     }
 
     async fn create(&self, iface: &DPUServiceInterface) -> Result<DPUServiceInterface, DpfError> {
+        let iface = Self::with_trace_annotations(iface);
         let namespace = iface.meta().namespace.as_deref().unwrap_or("default");
         let api = self.api(namespace);
-        Ok(api.create(&PostParams::default(), iface).await?)
+        Ok(api.create(&PostParams::default(), &iface).await?)
     }
 
     async fn patch(
@@ -895,6 +976,7 @@ impl DpfOperatorConfigRepository for KubeRepository {
         patch: serde_json::Value,
     ) -> Result<(), DpfError> {
         let api: Api<DPFOperatorConfig> = Api::namespaced(self.client.clone(), namespace);
+        let patch = Self::with_trace_annotations_patch(patch);
         api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
             .await?;
         Ok(())
@@ -932,7 +1014,7 @@ mod tests {
 
     /// Builds the smallest checked interface resource needed to verify repository transport.
     /// Uses a generated DPUServiceInterface to prove POST serialization matches the CR schema.
-    fn detached_interface() -> DPUServiceInterface {
+    pub(super) fn detached_interface() -> DPUServiceInterface {
         serde_json::from_value(json!({
             "apiVersion": "svc.dpu.nvidia.com/v1alpha1",
             "kind": "DPUServiceInterface",
@@ -1546,3 +1628,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod trace_context_tests;
