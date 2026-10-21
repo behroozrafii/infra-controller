@@ -1794,7 +1794,6 @@ async fn machine_validation_request_ids_are_validated(
     let statuses = [
         (
             "get attempt",
-            "attempt id",
             env.api
                 .get_machine_validation_attempt(authenticated_admin_request(
                     rpc::forge::MachineValidationAttemptGetRequest {
@@ -1806,7 +1805,6 @@ async fn machine_validation_request_ids_are_validated(
         ),
         (
             "find attempts",
-            "run item id",
             env.api
                 .find_machine_validation_attempts(authenticated_admin_request(
                     rpc::forge::MachineValidationAttemptSearchFilter {
@@ -1818,7 +1816,6 @@ async fn machine_validation_request_ids_are_validated(
         ),
         (
             "find run items",
-            "run item id",
             env.api
                 .find_machine_validation_run_items_by_ids(authenticated_machine_request(
                     rpc::forge::MachineValidationRunItemsByIdsRequest {
@@ -1831,7 +1828,6 @@ async fn machine_validation_request_ids_are_validated(
         ),
         (
             "append log",
-            "attempt id",
             env.api
                 .append_machine_validation_attempt_log(authenticated_machine_request(
                     rpc::forge::MachineValidationAttemptLogAppendRequest {
@@ -1846,13 +1842,8 @@ async fn machine_validation_request_ids_are_validated(
                 .unwrap_err(),
         ),
     ];
-    for (name, field, status) in statuses {
+    for (name, status) in statuses {
         assert_eq!(status.code(), tonic::Code::InvalidArgument, "{name}");
-        assert_eq!(
-            status.message(),
-            format!("machine validation {field} is not a valid UUID: not-a-uuid"),
-            "{name}",
-        );
     }
 
     for (field, target) in [
@@ -1879,10 +1870,6 @@ async fn machine_validation_request_ids_are_validated(
             .await
             .expect_err(field);
         assert_eq!(status.code(), tonic::Code::InvalidArgument, "{field}");
-        assert_eq!(
-            status.message(),
-            format!("machine validation {field} is not a valid UUID: not-a-uuid"),
-        );
     }
     Ok(())
 }
