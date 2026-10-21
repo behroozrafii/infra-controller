@@ -1104,7 +1104,7 @@ pub(crate) async fn invoke_power(
             )
         {
             return Err(CarbideError::FailedPrecondition(
-                "graceful restart requires an Assigned/Ready instance without always-on custom iPXE".into(),
+                "graceful restart requires an assigned/ready instance without always-on custom iPXE".into(),
             ).into());
         }
 
