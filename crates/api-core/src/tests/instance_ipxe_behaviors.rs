@@ -329,7 +329,7 @@ async fn test_instance_power_modes(pool: sqlx::PgPool) {
                     endpoint.report_version,
                     &report,
                     endpoint.waiting_for_explorer_refresh,
-                    &mut *txn
+                    &mut txn
                 )
                 .await
                 .unwrap(),
