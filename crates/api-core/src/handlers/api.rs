@@ -26,6 +26,8 @@ use tonic::{Request, Response, Status};
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 
+/// Lists the capabilities returned by Version so callers can check support
+/// before requesting operations such as graceful instance restart.
 fn advertised_build_capabilities() -> Vec<i32> {
     vec![
         rpc::BuildCapability::VpcSlaac as i32,

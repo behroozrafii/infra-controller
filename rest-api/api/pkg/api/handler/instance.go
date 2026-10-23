@@ -2236,6 +2236,10 @@ func NewUpdateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, 
 	}
 }
 
+// handleReboot checks Core support for graceful mode before changing instance
+// status, then records Rebooting and waits for the RebootInstanceV2 workflow.
+// Workflow success confirms acceptance, not completion of the guest OS restart;
+// subsequent inventory updates determine the instance's power status.
 func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Logger, apiRequest *model.APIInstanceUpdateRequest, instance *cdbm.Instance) error {
 	ctx := c.Request().Context()
 

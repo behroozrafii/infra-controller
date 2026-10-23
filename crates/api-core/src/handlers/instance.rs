@@ -1032,6 +1032,12 @@ pub(crate) async fn update_phone_home_last_contact(
     }))
 }
 
+/// Requests a hard or graceful host restart for an instance.
+///
+/// Graceful restart requires an Assigned/Ready instance, no custom iPXE or
+/// update request, and discovery data excluding known restart workarounds.
+/// Success means the request was accepted, not that the guest OS restarted.
+/// A failed graceful restart never falls back to a hard reset.
 pub(crate) async fn invoke_power(
     api: &Api,
     request: Request<rpc::InstancePowerRequest>,

@@ -272,69 +272,86 @@ async fn test_instance_power_modes(pool: sqlx::PgPool) {
     let host_ip = mh.host().bmc_ip(&mut txn).await.unwrap();
     txn.rollback().await.unwrap();
 
+    struct Case {
+        name: &'static str,
+        operation: i32,
+        boot_with_custom_ipxe: bool,
+        apply_updates_on_reboot: bool,
+        inject_failure: bool,
+        error: Option<tonic::Code>,
+        expected: Vec<RedfishSimAction>,
+    }
+
     let cases = [
-        (
-            "hard default",
-            Operation::PowerReset as i32,
-            false,
-            false,
-            false,
-            None,
-            vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)],
-        ),
-        (
-            "graceful host restart",
-            Operation::PowerGracefulRestart as i32,
-            false,
-            false,
-            false,
-            None,
-            vec![RedfishSimAction::Power(SystemPowerControl::GracefulRestart)],
-        ),
-        (
-            "unknown operation",
-            99,
-            false,
-            false,
-            false,
-            Some(tonic::Code::InvalidArgument),
-            vec![],
-        ),
-        (
-            "custom ipxe",
-            Operation::PowerGracefulRestart as i32,
-            true,
-            false,
-            false,
-            Some(tonic::Code::InvalidArgument),
-            vec![],
-        ),
-        (
-            "update approval",
-            Operation::PowerGracefulRestart as i32,
-            false,
-            true,
-            false,
-            Some(tonic::Code::InvalidArgument),
-            vec![],
-        ),
-        (
-            "no hard fallback",
-            Operation::PowerGracefulRestart as i32,
-            false,
-            false,
-            true,
-            Some(tonic::Code::Internal),
-            vec![RedfishSimAction::PowerFailed(
+        Case {
+            name: "hard default",
+            operation: Operation::PowerReset as i32,
+            boot_with_custom_ipxe: false,
+            apply_updates_on_reboot: false,
+            inject_failure: false,
+            error: None,
+            expected: vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)],
+        },
+        Case {
+            name: "graceful host restart",
+            operation: Operation::PowerGracefulRestart as i32,
+            boot_with_custom_ipxe: false,
+            apply_updates_on_reboot: false,
+            inject_failure: false,
+            error: None,
+            expected: vec![RedfishSimAction::Power(SystemPowerControl::GracefulRestart)],
+        },
+        Case {
+            name: "unknown operation",
+            operation: 99,
+            boot_with_custom_ipxe: false,
+            apply_updates_on_reboot: false,
+            inject_failure: false,
+            error: Some(tonic::Code::InvalidArgument),
+            expected: vec![],
+        },
+        Case {
+            name: "custom ipxe",
+            operation: Operation::PowerGracefulRestart as i32,
+            boot_with_custom_ipxe: true,
+            apply_updates_on_reboot: false,
+            inject_failure: false,
+            error: Some(tonic::Code::InvalidArgument),
+            expected: vec![],
+        },
+        Case {
+            name: "update approval",
+            operation: Operation::PowerGracefulRestart as i32,
+            boot_with_custom_ipxe: false,
+            apply_updates_on_reboot: true,
+            inject_failure: false,
+            error: Some(tonic::Code::InvalidArgument),
+            expected: vec![],
+        },
+        Case {
+            name: "no hard fallback",
+            operation: Operation::PowerGracefulRestart as i32,
+            boot_with_custom_ipxe: false,
+            apply_updates_on_reboot: false,
+            inject_failure: true,
+            error: Some(tonic::Code::Internal),
+            expected: vec![RedfishSimAction::PowerFailed(
                 SystemPowerControl::GracefulRestart,
             )],
-        ),
+        },
     ];
-    for (name, operation, boot_with_custom_ipxe, apply_updates_on_reboot, fail, error, expected) in
-        cases
+    for Case {
+        name,
+        operation,
+        boot_with_custom_ipxe,
+        apply_updates_on_reboot,
+        inject_failure,
+        error,
+        expected,
+    } in cases
     {
         let checkpoint = env.redfish_sim.timepoint();
-        if fail {
+        if inject_failure {
             env.redfish_sim
                 .fail_next_power_action(SystemPowerControl::GracefulRestart, "injected failure");
         }

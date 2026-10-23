@@ -1595,8 +1595,11 @@ func (iur *APIInstanceUpdateRequest) IsRebootRequest() bool {
 // Validate ensures the values passed in request are acceptable
 func (iur APIInstanceUpdateRequest) Validate() error {
 	if iur.RebootMode != nil {
-		if !iur.IsRebootRequest() || (*iur.RebootMode != InstanceRebootModeHard && *iur.RebootMode != InstanceRebootModeGraceful) {
-			return validation.Errors{"rebootMode": errors.New("`rebootMode` must be Hard or Graceful and requires `triggerReboot: true`")}
+		if *iur.RebootMode != InstanceRebootModeHard && *iur.RebootMode != InstanceRebootModeGraceful {
+			return validation.Errors{"rebootMode": errors.New("`rebootMode` must be Hard or Graceful")}
+		}
+		if !iur.IsRebootRequest() {
+			return validation.Errors{"rebootMode": errors.New("`rebootMode` requires `triggerReboot: true`")}
 		}
 		if *iur.RebootMode == InstanceRebootModeGraceful && ((iur.RebootWithCustomIpxe != nil && *iur.RebootWithCustomIpxe) || (iur.ApplyUpdatesOnReboot != nil && *iur.ApplyUpdatesOnReboot)) {
 			return validation.Errors{"rebootMode": errors.New("graceful reboot cannot be combined with `rebootWithCustomIpxe: true` or `applyUpdatesOnReboot: true`")}
