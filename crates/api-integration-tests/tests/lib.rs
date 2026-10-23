@@ -57,6 +57,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 const UNDERLAY_DHCP_RELAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(172, 20, 1, 1);
+const SSH_METRIC_CATALOGUE_OUTPUT: &str = "CARBIDE_SSH_METRIC_CATALOGUE_OUTPUT";
 
 #[ctor::ctor(unsafe)]
 fn setup() {
@@ -66,6 +67,12 @@ fn setup() {
 /// Run multiple machine-a-tron integration tests in parallel against a shared carbide API instance.
 #[test]
 fn test_integration() -> eyre::Result<()> {
+    if let Some(output_path) = std::env::var_os(SSH_METRIC_CATALOGUE_OUTPUT) {
+        return utils::api_server_runtime_builder()
+            .worker_threads(2)
+            .build()?
+            .block_on(write_ssh_console_metric_info(output_path.into()));
+    }
     utils::api_server_runtime_builder()
         .build()?
         .block_on(run_integration())
@@ -82,10 +89,20 @@ async fn run_integration() -> eyre::Result<()> {
         println!("test_integration: SKIPPED (set REPO_ROOT and DATABASE_URL to run)");
         return Ok(());
     };
+    // Enable SPDM so its controller metrics appear in the catalogue scrape.
+    test_env.spdm_enabled = true;
+
+    db::migrations::migrate(&test_env.db_pool).await?;
+    // An empty profile set is the precondition for skipping SPDM verification.
+    assert!(
+        db::attestation_profile::list(&test_env.db_pool)
+            .await?
+            .is_empty(),
+        "SPDM metrics coverage requires an empty attestation profile set at startup"
+    );
 
     // Persist a predecessor root without a protection request before either API
     // starts, then verify that the background controller makes it ready.
-    db::migrations::migrate(&test_env.db_pool).await?;
     let mut txn = test_env.db_pool.begin().await?;
     let recovery_tenant_id = "site-prefix-recovery";
     db::tenant::create_and_persist(
@@ -481,9 +498,10 @@ async fn run_integration() -> eyre::Result<()> {
             .await?;
         }
     }
+    wait_for_count_metric_aliases(&test_env).await?;
     // Exercise the library sampler on the server's meter without activating a
-    // remote backend. Stop its task before `generate_core_metric_docs`, whose
-    // metric fetch and file write can panic on I/O errors.
+    // remote backend. Stop its task before catalogue collection and generation,
+    // which can return early or panic on I/O errors.
     let mut cleanup_metric_tasks = tokio::task::JoinSet::new();
     let cleanup_metric_cancel = cancel_token.child_token();
     carbide_resource_pool::remote::start_cleanup_metrics(
@@ -502,7 +520,9 @@ async fn run_integration() -> eyre::Result<()> {
         result?;
     }
     cleanup_metric_result?;
-    generate_core_metric_docs(&test_env.carbide_metrics_addrs);
+    let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
+    metric_infos.push(collect_ssh_console_metric_info().await?);
+    generate_core_metric_docs(metric_infos);
     drop(mqtt_client);
 
     // MaT opens ScoutStream on its primary API address and shares ordinary RPCs across both.
@@ -538,6 +558,40 @@ async fn run_integration() -> eyre::Result<()> {
     }
     test_env.db_pool.close().await;
     bmc_mock_handle.stop().await?;
+    Ok(())
+}
+
+/// Waits for both count names before the catalogue scrape.
+async fn wait_for_count_metric_aliases(test_env: &IntegrationTestEnvironment) -> eyre::Result<()> {
+    for (legacy, alias) in [
+        ("carbide_preingestion_total", "carbide_preingestion_count"),
+        ("carbide_machines_total", "carbide_machines_count"),
+        (
+            "carbide_network_segments_total",
+            "carbide_network_segments_count",
+        ),
+        ("carbide_vpc_prefixes_total", "carbide_vpc_prefixes_count"),
+        (
+            "carbide_extension_services_total",
+            "carbide_extension_services_count",
+        ),
+        (
+            "carbide_spdm_attestation_total",
+            "carbide_spdm_attestation_count",
+        ),
+        ("carbide_ib_partitions_total", "carbide_ib_partitions_count"),
+        ("carbide_power_shelves_total", "carbide_power_shelves_count"),
+        ("carbide_racks_total", "carbide_racks_count"),
+        ("carbide_switches_total", "carbide_switches_count"),
+    ] {
+        for name in [legacy, alias] {
+            metrics::wait_for_metric_line(
+                &test_env.carbide_metrics_addrs,
+                &format!("# TYPE {name} gauge\n"),
+            )
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -604,8 +658,71 @@ async fn exercise_dpf_exploration_suppression(
     Ok(())
 }
 
-fn generate_core_metric_docs(metrics_endpoints: &[SocketAddr]) {
-    let mut infos = metrics::collect_metric_infos(metrics_endpoints).unwrap();
+async fn collect_ssh_console_metric_info() -> eyre::Result<metrics::MetricInfo> {
+    // A separate process prevents SSH Console from replacing the API server's
+    // global meter provider or binding its cached Events to that provider.
+    let output_dir = temp_dir::TempDir::with_prefix("ssh-metric-catalogue")?;
+    let output_path = output_dir.path().join("metric.json");
+    let mut child = tokio::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", "test_integration", "--nocapture"])
+        .env(SSH_METRIC_CATALOGUE_OUTPUT, &output_path)
+        .kill_on_drop(true)
+        .spawn()?;
+    // This child only starts local listeners, scrapes once, and shuts down.
+    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+        Ok(status) => status?,
+        Err(error) => {
+            child.kill().await?;
+            return Err(error).wrap_err("SSH metric catalogue subprocess timed out");
+        }
+    };
+    eyre::ensure!(
+        status.success(),
+        "SSH metric catalogue subprocess failed: {status}"
+    );
+    let (name, ty, help): (String, String, String) =
+        serde_json::from_slice(&std::fs::read(output_path)?)?;
+    Ok(metrics::MetricInfo { name, ty, help })
+}
+
+async fn write_ssh_console_metric_info(output_path: PathBuf) -> eyre::Result<()> {
+    use ssh_console::shutdown_handle::ShutdownHandle;
+
+    let certs = &utils::LOCALHOST_CERTS;
+    let config = ssh_console::config::Config {
+        listen_address: "127.0.0.1:0".parse()?,
+        metrics_address: "127.0.0.1:0".parse()?,
+        api_listen_address: "127.0.0.1:0".parse()?,
+        carbide_uri: "https://localhost:1".parse()?,
+        override_bmcs: Some(Vec::new()),
+        host_key_path: utils::REPO_ROOT
+            .join("crates/ssh-console/tests/fixtures/ssh_host_ed25519_key"),
+        forge_root_ca_path: certs.ca_cert.clone(),
+        client_cert_path: certs.client_cert.clone(),
+        client_key_path: certs.client_key.clone(),
+        console_logging_enabled: false,
+        ..Default::default()
+    };
+    let handle = ssh_console::spawn(config, None).await?;
+    let infos = metrics::collect_metric_infos(&[handle.metrics_address()]);
+    handle.shutdown_and_wait().await;
+    let info = infos?
+        .into_iter()
+        .find(|info| info.name == "carbide_ssh_console_bmc_recovery_attempts_total")
+        .context("SSH console did not export its BMC recovery counter")?;
+    assert_eq!(info.ty, "counter");
+    assert!(
+        !info.help.is_empty(),
+        "the SSH recovery counter needs HELP text"
+    );
+    std::fs::write(
+        output_path,
+        serde_json::to_vec(&(info.name, info.ty, info.help))?,
+    )?;
+    Ok(())
+}
+
+fn generate_core_metric_docs(mut infos: Vec<metrics::MetricInfo>) {
     retain_existing_core_metric_infos(&mut infos);
 
     // Delete everything with "alt_metric_" prefix
@@ -790,6 +907,7 @@ async fn run_metrics_integration() -> eyre::Result<()> {
         metrics: _,
         db_url: _,
         credential_config: _,
+        spdm_enabled: _,
         _vault_handle,
     } = test_env.clone();
 
@@ -829,6 +947,9 @@ async fn run_metrics_integration() -> eyre::Result<()> {
                 )
                     .await?;
                 metrics::assert_metric_line(&metrics, r#"carbide_machines_total{fresh="true"} 1"#);
+                for name in ["carbide_spdm_attestation_total", "carbide_spdm_attestation_count"] {
+                    metrics::assert_not_metric_line(&metrics, name);
+                }
                 // Also check that metrics are emitted under the configured `alt_metric_prefix`
                 metrics::assert_metric_line(&metrics, r#"alt_metric_machines_total{fresh="true"} 1"#);
                 metrics::assert_not_metric_line(
