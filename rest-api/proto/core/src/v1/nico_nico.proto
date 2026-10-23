@@ -354,6 +354,9 @@ service Forge {
   // picks up the freshly persisted report for downstream processing (pairing,
   // remediation, audit). Returns AlreadyExists
   // if a concurrent refresh or periodic probe is already in progress.
+  // During DPF provisioning, queues exploration and returns the cached report
+  // with exploration_requested=true. The queued refresh runs after all Site
+  // Explorer suppressions are cleared. Non-DPF suppressions alone return FailedPrecondition.
   rpc RefreshEndpointReport(RefreshEndpointReportRequest) returns (site_explorer.ExploredEndpoint);
   // Delete an explored endpoint from the database
   rpc DeleteExploredEndpoint(DeleteExploredEndpointRequest) returns (DeleteExploredEndpointResponse);
@@ -2859,6 +2862,10 @@ message ExpectedPowerShelf {
   string bmc_username = 2;
   string bmc_password = 3;
   string shelf_serial_number = 4;
+  // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Empty or omitted means no inventory address on add, full update, or
+  // replace-all. Masked updates apply this field only when selected.
+  // Clearing the inventory address does not remove existing interface addresses.
   string bmc_ip_address = 5;
   // Metadata that will automatically get associated with a newly created PowerShelf
   Metadata metadata = 6;
@@ -3116,6 +3123,10 @@ message ExpectedSwitch {
   // changed from string to message.
   reserved 10;
   reserved "nvos_mac_addresses";
+  // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Empty or omitted means no inventory address on add, full update, or
+  // replace-all. Masked updates apply this field only when selected.
+  // Clearing the inventory address does not remove existing interface addresses.
   string bmc_ip_address = 11;
   // When true, site-explorer skips BMC password rotation and stores the
   // factory-default credentials in Vault as-is.
@@ -6166,7 +6177,11 @@ message ForgeAgentControlResponse {
       MlxDeviceLock lock = 3;
       MlxDeviceUnlock unlock = 4;
       MlxDeviceApplyProfile apply_profile = 5;
+      // Legacy uncorrelated firmware command. Scouts supporting durable firmware
+      // operations reject this command before executing it.
       MlxDeviceApplyFirmware apply_firmware = 6;
+      // Durable firmware work uses a distinct tag so older Scouts ignore it.
+      MlxDeviceApplyFirmwareOperation apply_firmware_operation = 7;
     }
   }
 
@@ -6187,6 +6202,18 @@ message ForgeAgentControlResponse {
 
   message MlxDeviceApplyFirmware {
     optional mlx_device.FirmwareFlasherProfile profile = 1;
+  }
+
+  // Submit or observe one durable firmware operation. This command is omitted
+  // from the legacy JSON projection because older Scouts cannot deduplicate it.
+  message MlxDeviceApplyFirmwareOperation {
+    // Selected target; omission records a successful operation without a burn.
+    optional mlx_device.FirmwareFlasherProfile profile = 1;
+    // Stable identifier containing 1-256 printable nonspace ASCII bytes for one
+    // persisted ApplyFirmware state entry. Repeated polls reuse this value even
+    // when profile is absent; a later state entry receives a different value.
+    // Omitted or empty values are rejected.
+    string operation_id = 2;
   }
 
   message FirmwareUpgrade {
@@ -7666,9 +7693,12 @@ message  GetMachineValidationExternalConfigResponse {
 }
 
 message GetMachineValidationExternalConfigsRequest {
+  // Exact configuration names to return. Omitted or empty names list all stored
+  // configurations. Names with no stored configuration contribute no entries.
   repeated string names = 1;
 }
 message  GetMachineValidationExternalConfigsResponse {
+  // Each selected configuration appears once. The order is unspecified.
   repeated MachineValidationExternalConfig configs = 1;
 }
 
@@ -8845,7 +8875,10 @@ message PowerOptionUpdateRequest {
 message PowerOptions {
   PowerState desired_state = 1;
   google.protobuf.Timestamp desired_state_updated_at = 2;
+  // PowerManagerDisabled when desired_state disables observation; otherwise the
+  // last fetched power state. Disabling does not overwrite the stored observation.
   PowerState actual_state = 3;
+  // Last power-state fetch time, retained while the power manager is disabled.
   google.protobuf.Timestamp actual_state_updated_at = 4;
   common.MachineId host_id = 5;
   string desired_power_state_version = 6;

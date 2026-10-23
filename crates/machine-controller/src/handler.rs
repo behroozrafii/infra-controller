@@ -1820,9 +1820,9 @@ impl MachineStateHandler {
                                 .await
                             }
                             CreateBossVolumeState::LockHost => {
-                                if matches!(
-                                    cleanup_context,
-                                    CleanupContext::Deprovision | CleanupContext::Reset
+                                if should_reenable_boss_lockdown(
+                                    *cleanup_context,
+                                    mh_snapshot.host_snapshot.host_profile.disable_lockdown,
                                 ) {
                                     redfish_client
                                         .set_idrac_lockdown(EnabledDisabled::Enabled)
@@ -3216,6 +3216,8 @@ impl StateHandler for MachineStateHandler {
         _mh_state: &Self::ControllerState, // mh_snapshot above already contains it
         ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+        let was_dpf_provisioning = mh_snapshot.managed_state.suppresses_exploration_for_dpf();
+
         // Refresh the per-object info/association series before any early
         // return: hosts stuck erroring must keep their join series alive, or
         // hold-period eviction drops exactly the machines being triaged.
@@ -3323,6 +3325,25 @@ impl StateHandler for MachineStateHandler {
             let mut txn = power_options_pool.begin().await?;
             db::power_options::persist(&power_options, &mut txn).await?;
             txn.commit().await?;
+        }
+
+        if let Ok(outcome) = result {
+            let next_state = match &outcome {
+                StateHandlerOutcome::Transition { next_state, .. } => next_state,
+                _ => &mh_snapshot.managed_state,
+            };
+            let suppress = next_state.suppresses_exploration_for_dpf();
+            // Wait outcomes have no state-version check, so they must not recreate
+            // suppression after a concurrent force-delete clears it.
+            if was_dpf_provisioning != suppress {
+                result =
+                    Ok(
+                        dpf::update_exploration_suppression(outcome, mh_snapshot, suppress, ctx)
+                            .await?,
+                    );
+            } else {
+                result = Ok(outcome);
+            }
         }
 
         result
@@ -3934,7 +3955,7 @@ async fn handle_dpu_reprovision(
                     )));
                 }
 
-                if !managed_host_network_config_version_synced_and_dpu_healthy(
+                if let Some(not_ready_reason) = dpu_network_not_ready_reason(
                     dsnapshot,
                     state.host_snapshot.network_config.version,
                 ) {
@@ -3958,14 +3979,19 @@ async fn handle_dpu_reprovision(
                                 reachability_params,
                                 ctx,
                             )
-                            .await?,
+                            .await
+                            .map_err(|e| {
+                                dpu_network_not_ready_error(e, &dsnapshot.id, not_ready_reason)
+                            })?,
                         );
                     }
-                    // TODO: Make is_network_ready give us more details as a string
-                    return Ok(StateHandlerOutcome::wait(format!(
-                        "Waiting for DPU {} to sync network config/become healthy;\nreboot status: {reboot_status:#?}",
-                        dsnapshot.id
-                    )));
+                    return Ok(StateHandlerOutcome::wait(
+                        dpu_network_not_ready_wait_message(
+                            &dsnapshot.id,
+                            not_ready_reason,
+                            &reboot_status,
+                        ),
+                    ));
                 }
             }
 
@@ -5420,7 +5446,7 @@ impl DpuMachineStateHandler {
                 // is_network_ready is syncing over all DPUs.
                 // The code will move only when all DPUs returns network_ready signal.
                 for dsnapshot in &state.dpu_snapshots {
-                    if !managed_host_network_config_version_synced_and_dpu_healthy(
+                    if let Some(not_ready_reason) = dpu_network_not_ready_reason(
                         dsnapshot,
                         state.host_snapshot.network_config.version,
                     ) {
@@ -5438,15 +5464,20 @@ impl DpuMachineStateHandler {
                                     &self.reachability_params,
                                     ctx,
                                 )
-                                .await?,
+                                .await
+                                .map_err(|e| {
+                                    dpu_network_not_ready_error(e, &dsnapshot.id, not_ready_reason)
+                                })?,
                             );
                         }
 
-                        // TODO: Make is_network_ready give us more details as a string
-                        return Ok(StateHandlerOutcome::wait(format!(
-                            "Waiting for DPU agent to apply network config and report healthy network for DPU {}\nreboot status: {reboot_status:#?}",
-                            dsnapshot.id
-                        )));
+                        return Ok(StateHandlerOutcome::wait(
+                            dpu_network_not_ready_wait_message(
+                                &dsnapshot.id,
+                                not_ready_reason,
+                                &reboot_status,
+                            ),
+                        ));
                     }
                 }
 
@@ -6350,22 +6381,53 @@ impl HostMachineStateHandler {
     }
 }
 
-fn managed_host_network_config_version_synced_and_dpu_healthy(
+/// Returns why the DPU does not yet count as network-ready, or `None` if it is.
+fn dpu_network_not_ready_reason(
     dpu_snapshot: &DpuMachine,
     host_version: ConfigVersion,
-) -> bool {
+) -> Option<&'static str> {
     if !dpu_snapshot.managed_host_network_config_version_synced(host_version) {
-        return false;
+        return Some("DPU agent has not reported the current network config version");
     }
 
     let Some(dpu_health) = dpu_snapshot.dpu_agent_health_report() else {
-        return false;
+        return Some("DPU agent has not reported a health report");
     };
 
     // Note that DPU alerts may be surpressed (classifications removed) in the aggregate health
     // report so the individual DPU's report is used.
-    !dpu_health
+    dpu_health
         .has_classification(&health_report::HealthAlertClassification::prevent_host_state_changes())
+        .then_some("check the DPU health alerts")
+}
+
+/// Wait message for a DPU that is not yet network ready, shared by the DPU init and
+/// reprovision paths.
+fn dpu_network_not_ready_wait_message(
+    dpu_id: &DpuMachineId,
+    not_ready_reason: &str,
+    reboot_status: &Option<RebootStatus>,
+) -> String {
+    format!(
+        "Waiting for DPU agent to apply network config and report healthy network for DPU {dpu_id}: {not_ready_reason}\nreboot status: {reboot_status:#?}"
+    )
+}
+
+/// Names the blocker when the reboot attempts for a DPU that is not network ready run
+/// out, so the error does not read as a generic unresponsive machine.
+fn dpu_network_not_ready_error(
+    error: StateHandlerError,
+    dpu_id: &DpuMachineId,
+    not_ready_reason: &str,
+) -> StateHandlerError {
+    match error {
+        StateHandlerError::ManualInterventionRequired(msg) => {
+            StateHandlerError::ManualInterventionRequired(format!(
+                "DPU {dpu_id} is not network ready: {not_ready_reason}; {msg}"
+            ))
+        }
+        other => other,
+    }
 }
 
 fn check_host_health_for_alerts(state: &ManagedHostStateSnapshot) -> Result<(), StateHandlerError> {
@@ -13115,6 +13177,13 @@ fn get_next_state_boss_job_failure(
     Ok((next_state, expected_power_state))
 }
 
+fn should_reenable_boss_lockdown(cleanup_context: CleanupContext, disable_lockdown: bool) -> bool {
+    matches!(
+        cleanup_context,
+        CleanupContext::Deprovision | CleanupContext::Reset
+    ) && !disable_lockdown
+}
+
 fn handle_boss_controller_job_error(
     boss_controller_id: String,
     iterations: u32,
@@ -15274,6 +15343,73 @@ mod tests {
     }
 
     #[test]
+    fn dpu_network_not_ready_reason_names_the_blocker() {
+        use model::test_support::machine_snapshot::{config_version, dpu_machine};
+
+        fn blocking_alert() -> HealthProbeAlert {
+            HealthProbeAlert {
+                id: HealthProbeId::bgp_peering_tor(),
+                target: None,
+                in_alert_since: None,
+                message: "test alert".to_string(),
+                tenant_message: None,
+                classifications: vec![HealthAlertClassification::prevent_host_state_changes()],
+            }
+        }
+
+        // The fixture DPU observed network config V3 and has a clean DPU agent report.
+        check_values(
+            [
+                Check {
+                    scenario: "synced and healthy",
+                    input: (config_version(3), None),
+                    expect: None,
+                },
+                Check {
+                    scenario: "agent observed an older config than the host expects",
+                    input: (config_version(4), None),
+                    expect: Some("DPU agent has not reported the current network config version"),
+                },
+                Check {
+                    scenario: "agent report missing",
+                    input: (config_version(3), Some(None)),
+                    expect: Some("DPU agent has not reported a health report"),
+                },
+                Check {
+                    scenario: "agent report has a lifecycle-blocking alert",
+                    input: (config_version(3), Some(Some(blocking_alert()))),
+                    expect: Some("check the DPU health alerts"),
+                },
+                Check {
+                    scenario: "unsynced config is reported before a missing report",
+                    input: (config_version(4), Some(None)),
+                    expect: Some("DPU agent has not reported the current network config version"),
+                },
+            ],
+            |(host_version, agent_report)| {
+                let mut dpu = dpu_machine(0);
+                match agent_report {
+                    None => {}
+                    Some(None) => {
+                        dpu.health_reports
+                            .merges
+                            .remove(health_report::HealthReport::DPU_AGENT_SOURCE);
+                    }
+                    Some(Some(alert)) => {
+                        dpu.health_reports
+                            .merges
+                            .get_mut(health_report::HealthReport::DPU_AGENT_SOURCE)
+                            .expect("fixture DPU has an agent report")
+                            .alerts
+                            .push(alert);
+                    }
+                }
+                dpu_network_not_ready_reason(&dpu, host_version)
+            },
+        );
+    }
+
+    #[test]
     fn pxe_blocking_bgp_alert_requires_probe_and_allocation_classification() {
         check_values(
             [
@@ -15806,6 +15942,37 @@ mod tests {
         let result =
             handle_no_dpu_error(Err(RedfishError::Lockdown), 0, "set_boot_order_dpu_first");
         assert!(matches!(result, Err(RedfishError::Lockdown)));
+    }
+
+    #[test]
+    fn boss_deprovision_lockdown_honors_disable_lockdown_policy() {
+        check_values(
+            [
+                Check {
+                    scenario: "deprovision relocks hosts by default",
+                    input: (CleanupContext::Deprovision, false),
+                    expect: true,
+                },
+                Check {
+                    scenario: "deprovision leaves opted-out hosts unlocked",
+                    input: (CleanupContext::Deprovision, true),
+                    expect: false,
+                },
+                Check {
+                    scenario: "reset relocks hosts by default",
+                    input: (CleanupContext::Reset, false),
+                    expect: true,
+                },
+                Check {
+                    scenario: "reset leaves opted-out hosts unlocked",
+                    input: (CleanupContext::Reset, true),
+                    expect: false,
+                },
+            ],
+            |(cleanup_context, disable_lockdown)| {
+                should_reenable_boss_lockdown(cleanup_context, disable_lockdown)
+            },
+        );
     }
 
     #[test]

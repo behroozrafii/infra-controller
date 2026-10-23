@@ -5,6 +5,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <table>
 <tr><td>Name</td><td>Type</td><td>Description</td></tr>
 <tr><td>carbide_active_host_firmware_update_count</td><td>gauge</td><td>Number of host machines in the system currently working on updating their firmware.</td></tr>
+<tr><td>carbide_alerts_suppressed_count</td><td>gauge</td><td>Whether external metrics based alerting is suppressed for a specific object</td></tr>
 <tr><td>carbide_api_admission_admitted_total</td><td>counter</td><td>Number of API requests admitted for execution</td></tr>
 <tr><td>carbide_api_admission_handler_execution_duration_seconds</td><td>histogram</td><td>Duration of admitted API request handler execution</td></tr>
 <tr><td>carbide_api_admission_pending_requests</td><td>gauge</td><td>Number of API requests currently waiting for an execution slot</td></tr>
@@ -140,6 +141,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_health_redfish_sse_event_record_resolution_failures_total</td><td>counter</td><td>Number of Redfish SSE event records dropped after a referenced record could not be resolved, by failure reason.</td></tr>
 <tr><td>carbide_health_report_submissions_total</td><td>counter</td><td>Number of health report submissions to the NICo API, by report target and outcome.</td></tr>
 <tr><td>carbide_host_reprovision_retries_total</td><td>counter</td><td>Number of times a failed host firmware upgrade was retried during host reprovisioning</td></tr>
+<tr><td>carbide_hosts_alerts_suppressed_count</td><td>gauge</td><td>Whether external metrics based alerting is suppressed for a specific object</td></tr>
 <tr><td>carbide_hosts_by_sku_count</td><td>gauge</td><td>Number of hosts by SKU and device type (&#39;unknown&#39; for hosts without SKU)</td></tr>
 <tr><td>carbide_hosts_health_overrides_count</td><td>gauge</td><td>Number of health overrides configured in the site</td></tr>
 <tr><td>carbide_hosts_health_status_count</td><td>gauge</td><td>Number of managed hosts in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts</td></tr>
@@ -148,6 +150,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hosts_unhealthy_by_probe_id_count</td><td>gauge</td><td>Number of objects which reported a certain Health Probe Alert</td></tr>
 <tr><td>carbide_hosts_usable_count</td><td>gauge</td><td>Number of remaining hosts in the NICo deployment available for immediate instance creation</td></tr>
 <tr><td>carbide_hosts_with_bios_password_set</td><td>gauge</td><td>Number of hosts in the system that have their BIOS password set.</td></tr>
+<tr><td>carbide_hosts_with_scout_heartbeat_timeout</td><td>gauge</td><td>Scout heartbeat timeout status for hosts</td></tr>
 <tr><td>carbide_ib_monitor_fabrics_count</td><td>gauge</td><td>Number of monitored InfiniBand fabrics</td></tr>
 <tr><td>carbide_ib_monitor_iteration_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one IB fabric monitor iteration</td></tr>
 <tr><td>carbide_ib_monitor_machine_ib_status_updates_count</td><td>gauge</td><td>Number of Machines whose InfiniBand status observation was updated</td></tr>
@@ -296,6 +299,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_reboot_attempts_in_booting_with_discovery_image</td><td>histogram</td><td>Reboot attempts per machine in BootingWithDiscoveryImage, recorded when a machine is rebooted again after no response from the host.</td></tr>
 <tr><td>carbide_redfish_action_result_persistence_failures_total</td><td>counter</td><td>Number of detached Redfish action results that failed to persist</td></tr>
 <tr><td>carbide_reserved_ips_count</td><td>gauge</td><td>Number of reserved IPs per network segment</td></tr>
+<tr><td>carbide_resource_pool_cleanup_pending</td><td>gauge</td><td>Number of remote allocations awaiting confirmed cancellation or release</td></tr>
 <tr><td>carbide_resource_pool_lifecycle_failures_total</td><td>counter</td><td>Number of resource pool lifecycle failures, by operation, failure, failure policy, allocation mode, and value type.</td></tr>
 <tr><td>carbide_resourcepool_free_count</td><td>gauge</td><td>Number of values in the resource pool currently available for allocation</td></tr>
 <tr><td>carbide_resourcepool_used_count</td><td>gauge</td><td>Number of currently allocated values in the resource pool</td></tr>
@@ -320,6 +324,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_site_explorer_create_machines_latency_milliseconds</td><td>histogram</td><td>The time it took to perform create_machines inside site-explorer</td></tr>
 <tr><td>carbide_site_explorer_created_machines_count</td><td>gauge</td><td>Number of machine pairs created by Site Explorer after identification in the last SiteExplorer run</td></tr>
 <tr><td>carbide_site_explorer_created_power_shelves_count</td><td>gauge</td><td>Number of power shelves created by Site Explorer after identification in the last SiteExplorer run</td></tr>
+<tr><td>carbide_site_explorer_dpf_explorations_deferred_total</td><td>counter</td><td>Number of periodic endpoint candidates skipped, re-exploration requests rejected, or refresh requests deferred during DPF provisioning, by request type.</td></tr>
 <tr><td>carbide_site_explorer_dpu_migration_signals_count</td><td>gauge</td><td>Number of DPU NIC-mode migration signals by signal type -- mode-mismatch found, set_nic_mode issued, reset requested, and zero-DPU registered for a host whose DPU policy is nic.</td></tr>
 <tr><td>carbide_site_explorer_enabled</td><td>gauge</td><td>Whether site-explorer is enabled (1) or paused (0)</td></tr>
 <tr><td>carbide_site_explorer_iteration_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one site explorer iteration</td></tr>
@@ -354,6 +359,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_switches_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_switches have spent in a certain state</td></tr>
 <tr><td>carbide_switches_total</td><td>gauge</td><td>Number of carbide_switches in the system</td></tr>
 <tr><td>carbide_switches_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_switches in a given state</td></tr>
+<tr><td>carbide_tokio_runtime_workers</td><td>gauge</td><td>Number of worker threads in the Tokio runtime</td></tr>
+<tr><td>carbide_tokio_worker_busy_seconds_total</td><td>counter</td><td>Number of seconds each Tokio runtime worker thread has spent running tasks</td></tr>
 <tr><td>carbide_total_ips_count</td><td>gauge</td><td>Number of IPs per network segment</td></tr>
 <tr><td>carbide_unavailable_dpu_nic_firmware_update_count</td><td>gauge</td><td>Number of machines in the system that need a DPU/NIC firmware update but are unavailable for update</td></tr>
 <tr><td>carbide_vpc_prefixes_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_vpc_prefixes in the system</td></tr>
