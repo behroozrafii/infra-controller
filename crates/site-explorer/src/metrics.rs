@@ -1957,6 +1957,10 @@ mod tests {
             "endpoint exploration duration" {
                 "carbide_endpoint_exploration_duration" => Yields(()),
             }
+
+            "endpoint exploration step latency" {
+                "carbide_endpoint_exploration_step_latency" => Yields(()),
+            }
         );
     }
 
