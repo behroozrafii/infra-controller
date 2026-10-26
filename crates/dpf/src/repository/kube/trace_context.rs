@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! Trace propagation at the DPF client's request boundary.
+//! Trace propagation at the Kubernetes client's request boundary.
 
 use http::{Method, Request, header};
 use kube::Client;
@@ -65,32 +65,20 @@ pub(super) fn wrap_client(client: Client) -> Client {
     Client::new(service, namespace).with_valid_until(valid_until)
 }
 
+/// Select writes whose JSON object bodies may carry annotations.
+/// The body parser leaves non-object bodies and explicit deletions unchanged.
 fn supported_write(request: &Request<Body>) -> bool {
-    let path: Vec<_> = request.uri().path().split('/').collect();
-    let (group, create) = match path.as_slice() {
-        ["", "apis", group, _, "namespaces", _, _] => (*group, true),
-        ["", "apis", group, _, "namespaces", _, _, _] => (*group, false),
-        _ => return false,
-    };
-    if !matches!(
-        group,
-        "provisioning.dpu.nvidia.com" | "svc.dpu.nvidia.com" | "operator.dpu.nvidia.com"
-    ) {
-        return false;
-    }
     let content_type = request
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());
-    if create {
-        request.method() == Method::POST && content_type == Some("application/json")
-    } else {
-        request.method() == Method::PATCH
-            && matches!(
-                content_type,
-                Some("application/apply-patch+yaml" | "application/merge-patch+json")
-            )
-    }
+    matches!(
+        *request.method(),
+        Method::POST | Method::PUT | Method::PATCH
+    ) && matches!(
+        content_type,
+        Some("application/json" | "application/apply-patch+yaml" | "application/merge-patch+json")
+    )
 }
 
 async fn inject_request(request: Request<Body>, context: &Context) -> kube::Result<Request<Body>> {

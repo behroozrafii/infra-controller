@@ -57,9 +57,11 @@ mod trace_context;
 
 /// Kubernetes-backed implementation of DPF repository.
 ///
-/// The client injects active trace context into annotations on DPF CR creates, applies, and merge
-/// patches. JSON patches, subresources, core resources, and explicit metadata deletions pass through
-/// unchanged. The globally configured propagator determines the fields under `tracing.k8s.io/`.
+/// The client injects active trace context into `metadata.annotations` on eligible JSON object
+/// writes (create, replace, apply, merge patch), regardless of API group or path. Reads, deletes,
+/// JSON patches, strategic merge patches, non-JSON bodies, and explicit metadata deletions pass
+/// through unchanged. Each API endpoint determines which fields it persists, including on
+/// subresources. The globally configured propagator determines the fields under `tracing.k8s.io/`.
 #[derive(Clone)]
 pub struct KubeRepository {
     client: Client,
@@ -72,7 +74,7 @@ impl KubeRepository {
         Ok(Self::with_client(Client::try_default().await?))
     }
 
-    /// Create a new KubeRepository with a provided client and DPF trace-annotation interception.
+    /// Create a new KubeRepository with a provided client and trace-annotation interception.
     pub fn with_client(client: Client) -> Self {
         Self {
             client: trace_context::wrap_client(client),

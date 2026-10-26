@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! Request-level proofs for DPF trace annotations.
+//! Request-level proofs for Kubernetes trace annotations.
 
 use std::future::Future;
 use std::sync::OnceLock;
@@ -394,10 +394,10 @@ async fn echo_request(
 }
 
 #[tokio::test]
-async fn interceptor_covers_all_repository_write_routes() {
-    // Inventory of creates, applies and merge patches exposed by KubeRepository. Repository-level
-    // tests above exercise serialization; these rows protect each route through the shared client.
-    for (group, resource, content_type) in [
+async fn interceptor_covers_supported_write_routes() {
+    // Repository tests above exercise serialization. These routes protect interception across
+    // repository writes, other API groups, cluster-scoped resources, and subresources.
+    let dpf_routes = [
         ("provisioning", "bfbs", "application/json"),
         ("provisioning", "bluefieldsoftwares", "application/json"),
         ("provisioning", "dpudevices", "application/json"),
@@ -442,17 +442,71 @@ async fn interceptor_covers_all_repository_write_routes() {
             "dpfoperatorconfigs",
             "application/merge-patch+json",
         ),
-    ] {
+    ].map(|(group, resource, content_type)| {
+        let create = content_type == "application/json";
+        let path = format!("/apis/{group}.dpu.nvidia.com/v1alpha1/namespaces/test-ns/{resource}{}?fieldManager=carbide-dpf-sdk", if create { "" } else { "/test" });
+        (if create { Method::POST } else { Method::PATCH }, path, content_type)
+    });
+    let other_routes = [
+        (
+            Method::POST,
+            "/api/v1/namespaces/test-ns/configmaps",
+            "application/json",
+        ),
+        (
+            Method::PATCH,
+            "/api/v1/namespaces/test-ns/configmaps/test",
+            "application/apply-patch+yaml",
+        ),
+        (
+            Method::PATCH,
+            "/api/v1/namespaces/test-ns/secrets/test",
+            "application/apply-patch+yaml",
+        ),
+        (
+            Method::PUT,
+            "/api/v1/namespaces/test-ns/configmaps/test",
+            "application/json",
+        ),
+        (
+            Method::PATCH,
+            "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpus/test/status",
+            "application/merge-patch+json",
+        ),
+        (
+            Method::PATCH,
+            "/apis/apps/v1/namespaces/test-ns/deployments/test/scale",
+            "application/merge-patch+json",
+        ),
+        (
+            Method::POST,
+            "/apis/other.example/v1/namespaces/test-ns/things",
+            "application/json",
+        ),
+        (Method::POST, "/api/v1/namespaces", "application/json"),
+        (
+            Method::POST,
+            "/apis/other.example/v1/things",
+            "application/json",
+        ),
+    ]
+    .map(|(method, path, content_type)| (method, path.to_owned(), content_type));
+    for (method, path, content_type) in dpf_routes.into_iter().chain(other_routes) {
         with_trace(Some("vendor=value"), async {
             let repository = echo_repository();
-            let create = content_type == "application/json";
-            let path = format!("/apis/{group}.dpu.nvidia.com/v1alpha1/namespaces/test-ns/{resource}{}?fieldManager=carbide-dpf-sdk", if create { "" } else { "/test" });
             let expected = current_traceparent();
-            let body = echo_request(&repository, if create { Method::POST } else { Method::PATCH }, &path, content_type, "{}").await;
+            let body = echo_request(&repository, method, &path, content_type, "{}").await;
             let actual: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(actual["metadata"]["annotations"][TRACEPARENT], expected, "{path}");
-            assert_eq!(actual["metadata"]["annotations"][TRACESTATE], "vendor=value", "{path}");
-        }).await;
+            assert_eq!(
+                actual["metadata"]["annotations"][TRACEPARENT], expected,
+                "{path}"
+            );
+            assert_eq!(
+                actual["metadata"]["annotations"][TRACESTATE], "vendor=value",
+                "{path}"
+            );
+        })
+        .await;
     }
 }
 
@@ -469,41 +523,6 @@ async fn excluded_requests_remain_byte_identical() {
                 "[ ]",
             ),
             (
-                "status",
-                Method::PATCH,
-                "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpus/test/status",
-                "application/merge-patch+json",
-                "{ }",
-            ),
-            (
-                "other subresource",
-                Method::POST,
-                "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpus/test/scale",
-                "application/json",
-                "{ }",
-            ),
-            (
-                "configmap",
-                Method::POST,
-                "/api/v1/namespaces/test-ns/configmaps",
-                "application/json",
-                "{ }",
-            ),
-            (
-                "secret",
-                Method::PATCH,
-                "/api/v1/namespaces/test-ns/secrets/test",
-                "application/apply-patch+yaml",
-                "{ }",
-            ),
-            (
-                "unrelated group",
-                Method::POST,
-                "/apis/other.example/v1/namespaces/test-ns/things",
-                "application/json",
-                "{ }",
-            ),
-            (
                 "watch",
                 Method::GET,
                 "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpus?watch=true",
@@ -513,13 +532,6 @@ async fn excluded_requests_remain_byte_identical() {
             (
                 "delete",
                 Method::DELETE,
-                "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpudevices/test",
-                "application/json",
-                "{ }",
-            ),
-            (
-                "replace",
-                Method::PUT,
                 "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpudevices/test",
                 "application/json",
                 "{ }",
@@ -544,6 +556,13 @@ async fn excluded_requests_remain_byte_identical() {
                 "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpudevices/test",
                 "application/merge-patch+json",
                 "{ \"metadata\": {\"annotations\": null} }",
+            ),
+            (
+                "non-object JSON",
+                Method::POST,
+                "/api/v1/namespaces/test-ns/configmaps",
+                "application/json",
+                "[ ]",
             ),
             (
                 "invalid JSON",
