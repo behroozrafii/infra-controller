@@ -23,6 +23,7 @@ REVIVE          := go tool revive
 BUILD_DIR := build/binaries
 IMAGE_REGISTRY := localhost:5000
 IMAGE_TAG := latest
+VERSION ?= dev
 DOCKERFILE_DIR := docker/production
 DOCKER_ARCHES := amd64 arm64
 LOCAL_REGISTRY_CONTAINER := nico-build-registry
@@ -308,6 +309,7 @@ docker-build:
 			tag=$(IMAGE_REGISTRY)/$$image:$(IMAGE_TAG)-$$arch; \
 			docker buildx build --platform linux/$$arch --push \
 				--build-arg TARGETOS=linux --build-arg TARGETARCH=$$arch \
+				--build-arg VERSION=$(VERSION) \
 				-t $$tag \
 				-f $(DOCKERFILE_DIR)/Dockerfile.$$image .; \
 			tags="$$tags $$tag"; \
