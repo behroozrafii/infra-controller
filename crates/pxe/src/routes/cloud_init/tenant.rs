@@ -146,16 +146,12 @@ async fn network_config(machine: Machine, state: State<AppState>) -> impl IntoRe
     axum_template::Render("network-config", state.engine.clone(), template_data)
 }
 
-async fn vendor_data(state: State<AppState>) -> impl IntoResponse {
+async fn vendor_data() -> impl IntoResponse {
     emit(PxeBootOutcome {
         endpoint: ENDPOINT,
         reason: OutcomeReason::Ok,
     });
-    axum_template::Render(
-        "printcontext",
-        state.engine.clone(),
-        HashMap::<String, String>::new(),
-    )
+    ""
 }
 
 /// Builds the tenant's route table under `path_prefix`: the four documents
@@ -401,6 +397,26 @@ mod tests {
                     ("endpoint", "cloud_init_tenant"),
                     ("reason", "metadata_not_found")
                 ],
+            ),
+            1.0,
+        );
+    }
+
+    #[tokio::test]
+    async fn vendor_data_returns_empty_document_and_counts_ok() {
+        let metrics = MetricsCapture::start();
+
+        let response = vendor_data().await.into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body.is_empty());
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_pxe_boot_outcomes_total",
+                &[("endpoint", "cloud_init_tenant"), ("reason", "ok")],
             ),
             1.0,
         );
