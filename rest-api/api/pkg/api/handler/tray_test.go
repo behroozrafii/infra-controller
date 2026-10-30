@@ -1426,6 +1426,16 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusOK,
 		},
 		{
+			name:           "decoded once with RawPath",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         "unit%3Along%252Flabel",
+			expectedTrayID: "unit:long%2Flabel",
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus: http.StatusOK,
+		},
+		{
 			name:              "malformed encoding",
 			reqOrg:            org,
 			user:              providerUser,
